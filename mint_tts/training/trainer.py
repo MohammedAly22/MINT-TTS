@@ -11,8 +11,8 @@ import torch
 
 from ..data.dataset import build_dataloader, resolve_dataset_fields
 from ..evaluation.asr import ASRScorer
-from ..evaluation.metrics import aggregate, mel_cepstral_distortion
-from ..evaluation.mos import MOSPredictor, quality_score
+from ..evaluation.metrics import aggregate, chance_mcd, mel_cepstral_distortion
+from ..evaluation.mos import DEFAULT_MCD_CHANCE, MOSPredictor, quality_score
 from ..losses.compute import ComputeLoss, sample_budget
 from ..losses.tts_losses import TTSLoss
 from ..models.tts import build_model
@@ -31,7 +31,7 @@ from ..utils.common import (
 )
 from ..utils.flops import human, parameter_table
 from ..utils.logging_utils import ExperimentLogger
-from .monitors import ComplexityProbe, log_training_examples
+from .monitors import ComplexityProbe, alignment_diagnostics, log_training_examples
 
 
 def build_scheduler(optimizer, cfg, total_steps: int):
@@ -108,6 +108,13 @@ class Trainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
         self.ema = EMA(self.model, p.get("ema_decay", 0.999)) if p.get("use_ema", True) else None
         self.grad_accum = int(p.get("grad_accum", 1))
+        # Routing stays off until the compute penalty turns on. An
+        # unconstrained router collapses to a constant depth on reconstruction
+        # loss alone, which is both uninformative and destabilising.
+        router_start = cfg.loss.compute.get("router_start_step", None)
+        if router_start is None:
+            router_start = cfg.loss.compute.get("warmup_steps", 0)
+        self.router_start_step = int(router_start) if self.compute_loss.enabled else 0
 
         self.vocoder = None
         if cfg.log.get("log_audio", True):
@@ -116,6 +123,8 @@ class Trainer:
             except Exception as exc:
                 self.log.warning(f"Vocoder unavailable ({exc}); audio logging disabled.")
 
+        self.mcd_chance = self._measure_mcd_chance()
+        self._check_figure_export()
         self.probe = ComplexityProbe(cfg, self.tp, self.device)
         self.asr = ASRScorer(cfg.eval.get("asr_backend", "none"), device="cpu")
         self.mos = MOSPredictor(cfg.eval.get("mos_backend", "proxy"), device="cpu")
@@ -131,6 +140,60 @@ class Trainer:
             self.log.info(f"Resumed from {resume} at step {self.step}")
 
         self._log_model_summary()
+
+    def _measure_mcd_chance(self) -> float:
+        """MCD between unrelated validation utterances: the no-information level.
+
+        Quality is reported relative to this. Without it, an MCD of 55 looks
+        like "high distortion" when it actually means "this model carries no
+        information about which utterance it was asked to say".
+        """
+        try:
+            ds = self.val_loader.dataset
+            n = min(int(self.cfg.eval.get("mcd_chance_utterances", 24)), len(ds))
+            mels = [torch.from_numpy(np.load(ds.rows[i]["mel"])).float() for i in range(n)]
+            value = chance_mcd(mels, n_pairs=self.cfg.eval.get("mcd_chance_pairs", 40))
+        except Exception as exc:
+            self.log.warning(f"Could not measure the chance MCD ({exc}); using the default.")
+            return float(DEFAULT_MCD_CHANCE)
+        if not np.isfinite(value) or value <= 0:
+            return float(DEFAULT_MCD_CHANCE)
+        self.log.info(f"Chance MCD on the val set: {value:.1f} "
+                      "(val/mcd at or above this means the model is not "
+                      "producing utterance-specific audio)")
+        return float(value)
+
+    def _check_figure_export(self) -> None:
+        """Verify TensorBoard can actually receive figures, before training.
+
+        Colab ships plotly 5.24 while pip pulls kaleido 1.x, which needs
+        plotly >= 6.1.1. The combination fails silently: no IMAGES tab at all,
+        so no alignment plot and no complexity heatmaps -- exactly the panels
+        this project exists to look at. Better to say so at step 0.
+        """
+        if self.logger.tb is None or not self.cfg.log.get("check_figure_export", True):
+            return
+        import plotly.graph_objects as go
+
+        from ..utils.plotting import to_image_arrays
+
+        if to_image_arrays([go.Figure(go.Scatter(x=[0, 1], y=[0, 1]))])[0] is not None:
+            return
+        try:
+            import kaleido
+            import plotly
+
+            detail = f"plotly {plotly.__version__} + kaleido {kaleido.__version__}"
+        except Exception:
+            detail = "kaleido not installed"
+        self.log.warning(
+            "FIGURE EXPORT IS BROKEN (%s). TensorBoard will have no IMAGES tab: "
+            "no alignment plots, no complexity heatmaps. Fix with "
+            "`pip install -U 'plotly>=6.1.1' 'kaleido>=1.0'` (then restart the "
+            "runtime), or add 'wandb' to log.backends, which renders plotly "
+            "natively. Scalar diagnostics under align/* still work either way.",
+            detail,
+        )
 
     # -- setup logging ----------------------------------------------------
     def _log_model_summary(self) -> None:
@@ -155,6 +218,10 @@ class Trainer:
                                "device_name": device_name(self.device)})
         self.logger.log_scalars({"model/parameters": float(total)}, 0)
 
+    @property
+    def routing_frozen(self) -> bool:
+        return self.step < self.router_start_step
+
     # -- one step ---------------------------------------------------------
     def train_step(self, batch: dict) -> dict:
         batch = move_to(batch, self.device)
@@ -173,6 +240,7 @@ class Trainer:
                 pitch=batch.get("pitch"), energy=batch.get("energy"),
                 speakers=batch.get("speakers"), emotions=batch.get("emotions"),
                 budget=budget, attn_prior=batch.get("attn_prior"),
+                force_full_depth=self.routing_frozen,
             )
             recon, logs = self.loss_fn(out, batch, self.step)
             comp, clogs = self.compute_loss(out, budget, self.step, batch.get("c_star"))
@@ -186,13 +254,18 @@ class Trainer:
             gn = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.cfg.train.get("grad_clip", 1.0))
             logs["train/grad_norm"] = gn.detach()
+            before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
-            self.scheduler.step()
+            # A skipped step (inf/nan under AMP) must not advance the schedule.
+            if self.scaler.get_scale() >= before:
+                self.scheduler.step()
             if self.ema is not None:
                 self.ema.update(self.model)
 
+        logs.update(alignment_diagnostics(out, batch))
+        logs["train/routing_frozen"] = float(self.routing_frozen)
         logs["train/lr"] = self.optimizer.param_groups[0]["lr"]
         logs["train/encoder_depth"] = out.encoder_router.mean_depth().detach()
         logs["train/decoder_depth"] = out.decoder_router.mean_depth().detach()
@@ -261,11 +334,14 @@ class Trainer:
             metrics["val/mos"] = aggregate(mos_scores)["mean"]
         else:
             metrics["val/mos_proxy"] = MOSPredictor.proxy_from_metrics(
-                metrics["val/mcd"], metrics.get("val/cer"))
+                metrics["val/mcd"], metrics.get("val/cer"), self.mcd_chance)
+        metrics["val/mcd_chance"] = self.mcd_chance
+        metrics["val/mcd_vs_chance"] = metrics["val/mcd"] / max(self.mcd_chance, 1e-6)
         metrics["val/quality_score"] = quality_score({
             "mcd": metrics.get("val/mcd", float("nan")),
             "cer": metrics.get("val/cer", float("nan")),
             "mos": metrics.get("val/mos", metrics.get("val/mos_proxy", float("nan"))),
+            "mcd_chance": self.mcd_chance,
         })
         metrics["val/compute_norm"] = float(np.mean(computes)) if computes else float("nan")
         metrics["val/flops_per_utterance"] = float(np.mean(flops_list)) if flops_list else float("nan")
@@ -330,6 +406,7 @@ class Trainer:
                         f"[val] step {self.step} | total {metrics.get('val/total', float('nan')):.4f} "
                         f"| mcd {metrics.get('val/mcd', float('nan')):.3f} "
                         f"| Q {metrics.get('val/quality_score', float('nan')):.3f} "
+                        f"| mcd/chance {metrics.get('val/mcd_vs_chance', float('nan')):.2f} "
                         f"| compute {metrics.get('val/compute_norm', float('nan')):.3f}"
                     )
                     if metrics.get("val/total", float("inf")) < self.best_val:

@@ -14,9 +14,23 @@ def mel_l1(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 
 def mel_cepstral_distortion(pred: torch.Tensor, target: torch.Tensor, n_mfcc: int = 13) -> float:
-    """MCD in dB computed from log-mels via a DCT (no external deps).
+    """MCD-style distortion from log-mels via a DCT (no external deps).
 
-    Standard formulation: 10/ln(10) * sqrt(2 * sum_i (c_i - c_i')^2).
+    Standard formulation: 10/ln(10) * sqrt(2 * sum_i (c_i - c_i')^2), applied
+    to cepstra derived from the 80-bin log-mel rather than from a WORLD/SPTK
+    mel-cepstral analysis, and without DTW.
+
+    That makes the numbers **not comparable to published MCD**, which usually
+    sits at 4-8 dB. On this scale, measured on LJSpeech-like features:
+
+        identical mels          0
+        mild noise              ~2
+        two DIFFERENT utterances ~52   <- the "no information" level
+        constant mean spectrum  ~220
+
+    Use `chance_mcd` to measure that reference on your own data instead of
+    trusting the number in isolation: a model scoring near it has learned
+    nothing utterance-specific, however good the mel loss looks.
     """
     T = min(pred.shape[-1], target.shape[-1])
     if T < 2:
@@ -37,6 +51,26 @@ def _dct(x: torch.Tensor) -> torch.Tensor:
     scale = torch.full((N,), np.sqrt(2.0 / N), device=x.device, dtype=x.dtype)
     scale[0] = np.sqrt(1.0 / N)
     return torch.matmul(x, basis.T) * scale
+
+
+def chance_mcd(mels: list, n_pairs: int = 40, seed: int = 0) -> float:
+    """MCD between *unrelated* utterances -- the no-information reference.
+
+    Anchoring quality to this makes the score meaningful across datasets and
+    feature settings, instead of relying on a constant calibrated elsewhere.
+    """
+    import random
+
+    if len(mels) < 2:
+        return float("nan")
+    rng = random.Random(seed)
+    vals = []
+    for _ in range(n_pairs):
+        i, j = rng.sample(range(len(mels)), 2)
+        v = mel_cepstral_distortion(mels[i], mels[j])
+        if np.isfinite(v):
+            vals.append(v)
+    return float(np.median(vals)) if vals else float("nan")
 
 
 def f0_rmse(pred_f0: torch.Tensor, target_f0: torch.Tensor) -> float:

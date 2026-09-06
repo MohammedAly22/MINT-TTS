@@ -8,8 +8,11 @@ soundfile>=0.12
 tensorboard>=2.14
 
 # Figures: plotly draws them, kaleido rasterises them for TensorBoard.
-plotly>=5.18
-kaleido>=0.2.1
+# These two MUST be compatible: kaleido 1.x requires plotly >= 6.1.1, and
+# Colab ships plotly 5.24 preinstalled. A mismatch silently disables every
+# image in TensorBoard, so the floor is pinned rather than left open.
+plotly>=6.1.1
+kaleido>=1.0
 pillow>=10.0
 
 # Text frontend.

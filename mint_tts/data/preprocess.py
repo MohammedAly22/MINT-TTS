@@ -13,6 +13,7 @@ internal aligner at training time, and the *compute* labels come later from
 from __future__ import annotations
 
 import json
+import os
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
@@ -78,6 +79,12 @@ def _text_processor(spec: tuple) -> TextProcessor:
         add_punctuation=punctuation,
         allow_growth=True,
     )
+
+
+def _init_worker() -> None:
+    torch.set_num_threads(1)
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
 
 
 def _spec_from_cfg(cfg) -> tuple:
@@ -178,7 +185,10 @@ def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "tra
 
     rows, errors = [], []
     if n_workers > 1:
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        # Each worker would otherwise start as many torch threads as there are
+        # cores and fight the others for them; Colab gives 2 vCPUs, so four
+        # workers x sixteen threads is pure contention.
+        with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker) as pool:
             futures = [
                 pool.submit(process_one, r, root, paths, ac, tp_spec,
                             cfg.audio.get("extract_pitch", True))

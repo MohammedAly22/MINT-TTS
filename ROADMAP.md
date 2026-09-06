@@ -37,6 +37,42 @@ data · `[ ]` not started.
 - [x] 72 unit tests covering routing equivalence, alignment, FLOPs, text and configs
 - [ ] HiFi-GAN weights fetched and verified (needs a manual download — see `scripts/download_vocoder.py`)
 
+## Fixed after the first LJSpeech run (2026-09-06)
+
+The first real run exposed several problems that only appear at scale. All are
+fixed; the run itself was diagnostic, not wasted.
+
+- [x] **Alignment was coupled to routing.** Aligner keys came from the encoder
+      output, which changes as the router learns. When routing collapsed around
+      step 2.8k the forming alignment was destroyed. Keys now come from the
+      token embedding, as in RAD-TTS/FastPitch.
+- [x] **The router ran unconstrained during warmup** and collapsed to a
+      constant depth (3.0 for every token, every sentence, every quality
+      budget) on reconstruction loss alone. Routing is now held at full depth
+      until the compute penalty engages (`router_start_step`).
+- [x] **Aligner scale.** With a fixed temperature of 5e-4 against LayerNormed
+      features the attention logits spanned ~0.01. Now a per-channel normalised
+      distance with a learned scale: ~2x faster alignment convergence.
+- [x] **`loss/forwardsum` weight 2.0** made it ~77% of the total loss; now 1.0.
+- [x] **No IMAGES tab at all.** Colab preinstalls plotly 5.24 while pip pulls
+      kaleido 1.x, which needs plotly >= 6.1.1 — static export failed silently.
+      Versions pinned, plus a startup check that says so at step 0.
+- [x] **Alignment health as scalars** (`align/entropy_ratio`,
+      `align/diagonality`, `align/hard_agreement`) so a broken aligner is
+      visible even when figures are unavailable.
+- [x] **`val/quality_score` was pinned at 0.** Its thresholds assumed 4-8 dB
+      literature MCD; this repo's DCT-of-log-mel MCD runs ~0-50. Quality is now
+      anchored to `val/mcd_chance`, measured per dataset, and
+      `val/mcd_vs_chance` >= 1.0 flags "no utterance-specific information".
+- [x] **Preprocessing 28 min -> ~2 min.** Pitch extraction was 95% of the time
+      (40 ms/utterance); replaced with a vectorised FFT autocorrelation (~15x
+      faster, optional pyworld backend) and worker threads pinned to 1.
+- [x] **Confusing target audio.** `audio_target` was the ground-truth mel put
+      through Griffin-Lim. Now logged as `audio_target_vocoded` alongside
+      `audio_target_original` (the untouched file), so the vocoder's ceiling is
+      distinguishable from the model's error.
+- [x] LR scheduler no longer advances on an AMP-skipped step.
+
 ## Phase 1 — test the hypothesis on LJSpeech (24 h, single speaker)
 
 - [ ] **E0** Dense baseline `exp0_dense` trained to convergence

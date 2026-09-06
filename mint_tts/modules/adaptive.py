@@ -221,11 +221,48 @@ class AdaptiveStack(nn.Module):
         budget: torch.Tensor | None = None,
         hard: bool = False,
         max_steps_override: int | None = None,
+        force_full_depth: bool = False,
     ) -> RouterOutput:
-        """x: (B, T, D); mask: (B, T) bool (True = real token)."""
-        if hard and self.routing != "fixed":
+        """x: (B, T, D); mask: (B, T) bool (True = real token).
+
+        `force_full_depth` runs the stack as if `routing: fixed`, without
+        touching the router's parameters. The trainer uses it during the
+        compute-penalty warmup: with no penalty the router is unconstrained,
+        and it reliably collapses to a constant depth for reconstruction
+        reasons alone -- taking the alignment down with it. Holding full depth
+        until the penalty engages keeps that phase clean.
+        """
+        if force_full_depth or self.routing == "fixed":
+            return self._forward_full(x, mask)
+        if hard:
             return self._forward_hard(x, mask, budget, max_steps_override)
         return self._forward_soft(x, mask, budget, max_steps_override)
+
+    def _forward_full(self, x, mask):
+        """Every position takes every step; the router is not consulted."""
+        B, T, _ = x.shape
+        dtype = x.dtype
+        m = mask.to(dtype)
+        state = x
+        for step in range(self.max_steps):
+            sb = self._step_bias(step, x.device, dtype)
+            inp = state + sb if sb is not None else state
+            state = self.block(step)(inp, mask, kv_input=inp) * m.unsqueeze(-1)
+        ones = m.expand(B, T)
+        n = float(self.max_steps)
+        return RouterOutput(
+            output=self.final_norm(state) * m.unsqueeze(-1),
+            ponder=ones * n,
+            n_updates=ones * n,
+            remainders=torch.zeros_like(ones),
+            halting_probs=torch.stack([ones] * self.max_steps, 1),
+            step_active=torch.stack([ones] * self.max_steps, 1),
+            mask=mask,
+            token_steps=float(m.sum()) * n,
+            kv_token_steps=float(m.sum()) * n,
+            attn_kv_steps=float((m.sum(1) ** 2).sum()) * n,
+            hard=False,
+        )
 
     # -- soft (differentiable) path ---------------------------------------
     def _forward_soft(self, x, mask, budget, max_steps_override):

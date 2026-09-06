@@ -9,6 +9,8 @@ if alignment collapses, every downstream complexity number is meaningless.
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,11 +19,27 @@ NEG = -1e9
 
 
 class AlignmentEncoder(nn.Module):
-    """Projects text and mel into a shared space and scores soft alignment."""
+    """Projects text and mel into a shared space and scores soft alignment.
 
-    def __init__(self, d_text: int, n_mels: int, d_attn: int = 80, temperature: float = 0.0005):
+    Scale matters more than it looks. The score is ``-scale * ||q - k||^2``,
+    and the text side of this model is LayerNormed, so the squared distances
+    land around 30 rather than the tens of thousands seen when the same
+    formulation is fed raw embeddings. With a fixed temperature of 5e-4 the
+    logits then span ~0.01, the attention comes out *exactly uniform*, and
+    gradients into the projections are scaled by that same 5e-4 -- the aligner
+    is effectively frozen and only the beta-binomial prior carries any signal.
+
+    So the distance is normalised per channel and the scale is a learned
+    parameter, which makes the initial sharpness independent of feature
+    magnitude and lets the model sharpen the alignment as it trains.
+    """
+
+    def __init__(self, d_text: int, n_mels: int, d_attn: int = 80, temperature: float = 1.0):
         super().__init__()
-        self.temperature = temperature
+        self.d_attn = d_attn
+        # softplus keeps it positive; init so softplus(raw) == temperature
+        init = math.log(math.expm1(max(float(temperature), 1e-3)))
+        self.log_scale = nn.Parameter(torch.tensor(init, dtype=torch.float32))
         self.key_proj = nn.Sequential(
             nn.Conv1d(d_text, d_text * 2, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -53,7 +71,9 @@ class AlignmentEncoder(nn.Module):
             + k.pow(2).sum(-1).unsqueeze(1)
             - 2.0 * torch.bmm(q, k.transpose(1, 2))
         ).clamp_min(0)                                 # (B, T_mel, T_text)
-        score = (-self.temperature * dist).unsqueeze(1)  # (B, 1, T_mel, T_text)
+        # per-channel mean squared distance x a learned scale
+        scale = F.softplus(self.log_scale)
+        score = (-scale * dist / self.d_attn).unsqueeze(1)   # (B, 1, T_mel, T_text)
 
         if attn_prior is not None:
             score = F.log_softmax(score, dim=-1) + torch.log(attn_prior.unsqueeze(1) + 1e-8)

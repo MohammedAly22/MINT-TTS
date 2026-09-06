@@ -32,6 +32,10 @@ class AudioConfig:
     max_wav_value: float = 32768.0
     trim_silence: bool = True
     trim_top_db: float = 60.0
+    pitch_backend: str = "autocorr"   # autocorr | pyworld | torchaudio
+    fmin_f0: float = 60.0
+    fmax_f0: float = 600.0
+    pitch_threshold: float = 0.35     # autocorrelation peak needed to call a frame voiced
 
     @classmethod
     def from_cfg(cls, cfg) -> "AudioConfig":
@@ -148,16 +152,88 @@ def trim_silence(wav: torch.Tensor, ac: AudioConfig) -> torch.Tensor:
 
 
 def compute_pitch(wav: torch.Tensor, ac: AudioConfig, n_frames: int) -> torch.Tensor:
-    """Frame-level F0 via torchaudio's YIN-like detector, resampled to mel frames."""
+    """Frame-level F0 by FFT autocorrelation, vectorised over frames.
+
+    torchaudio's `detect_pitch_frequency` accounted for ~95% of preprocessing
+    time (about 40 ms per utterance against ~2 ms for everything else), which
+    is what made LJSpeech take half an hour. This does the same job in a
+    couple of milliseconds by computing the autocorrelation of every frame at
+    once through the FFT.
+
+    Set `audio.pitch_backend: pyworld` for a higher-quality (and still fast)
+    DIO/StoneMask estimate when pyworld is installed.
+    """
+    if ac.pitch_backend == "pyworld":
+        f0 = _pitch_pyworld(wav, ac)
+        if f0 is not None:
+            return _fit_frames(f0, n_frames)
+    if ac.pitch_backend == "torchaudio":
+        try:
+            f0 = AF.detect_pitch_frequency(
+                wav.unsqueeze(0), sample_rate=ac.sample_rate,
+                frame_time=ac.hop_length / ac.sample_rate,
+                freq_low=ac.fmin_f0, freq_high=ac.fmax_f0,
+            ).squeeze(0)
+            return _fit_frames(torch.nan_to_num(f0), n_frames)
+        except Exception:
+            pass
+    return _fit_frames(_pitch_autocorr(wav, ac), n_frames)
+
+
+def _pitch_autocorr(wav: torch.Tensor, ac: AudioConfig) -> torch.Tensor:
+    win, hop = ac.win_length, ac.hop_length
+    if wav.numel() < win:
+        return torch.zeros(0)
+    frames = wav.unfold(0, win, hop)                       # (T, win)
+    frames = frames - frames.mean(-1, keepdim=True)
+    energy = frames.pow(2).sum(-1)
+
+    n_fft = 1
+    while n_fft < 2 * win:
+        n_fft *= 2
+    spec = torch.fft.rfft(frames * torch.hann_window(win, device=wav.device), n=n_fft)
+    acf = torch.fft.irfft(spec.real ** 2 + spec.imag ** 2, n=n_fft)[:, :win]
+    acf = acf / acf[:, :1].clamp_min(1e-9)                  # normalise by lag 0
+
+    min_lag = max(int(ac.sample_rate / ac.fmax_f0), 2)
+    max_lag = min(int(ac.sample_rate / ac.fmin_f0), win - 2)
+    if max_lag <= min_lag:
+        return torch.zeros(frames.shape[0])
+    window = acf[:, min_lag:max_lag]
+    peak, idx = window.max(-1)
+    lag = (idx + min_lag).to(torch.float32)
+
+    # parabolic interpolation around the peak for sub-sample resolution
+    i = (idx + min_lag).clamp(1, win - 2)
+    y0 = acf.gather(1, (i - 1).unsqueeze(1)).squeeze(1)
+    y1 = acf.gather(1, i.unsqueeze(1)).squeeze(1)
+    y2 = acf.gather(1, (i + 1).unsqueeze(1)).squeeze(1)
+    denom = (y0 - 2 * y1 + y2)
+    shift = torch.where(denom.abs() > 1e-9, 0.5 * (y0 - y2) / denom.clamp_min(1e-9), torch.zeros_like(denom))
+    lag = lag + shift.clamp(-1, 1)
+
+    f0 = ac.sample_rate / lag.clamp_min(1e-6)
+    voiced = (peak > ac.pitch_threshold) & (energy > energy.max() * 1e-4)
+    return torch.where(voiced, f0, torch.zeros_like(f0))
+
+
+def _pitch_pyworld(wav: torch.Tensor, ac: AudioConfig):
     try:
-        f0 = AF.detect_pitch_frequency(
-            wav.unsqueeze(0), sample_rate=ac.sample_rate,
-            frame_time=ac.hop_length / ac.sample_rate, freq_low=60, freq_high=600,
-        ).squeeze(0)
+        import numpy as _np
+        import pyworld
     except Exception:
-        return torch.zeros(n_frames)
-    f0 = torch.nan_to_num(f0, nan=0.0, posinf=0.0, neginf=0.0)
-    return _resize_1d(f0, n_frames)
+        return None
+    x = wav.detach().cpu().double().numpy()
+    frame_ms = 1000.0 * ac.hop_length / ac.sample_rate
+    f0, t = pyworld.dio(x, ac.sample_rate, f0_floor=ac.fmin_f0, f0_ceil=ac.fmax_f0,
+                        frame_period=frame_ms)
+    f0 = pyworld.stonemask(x, f0, t, ac.sample_rate)
+    return torch.from_numpy(_np.asarray(f0, dtype="float32"))
+
+
+def _fit_frames(x: torch.Tensor, n: int) -> torch.Tensor:
+    x = torch.nan_to_num(x.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    return _resize_1d(x, n)
 
 
 def compute_energy(mel: torch.Tensor) -> torch.Tensor:

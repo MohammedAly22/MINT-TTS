@@ -129,13 +129,14 @@ class AdaptiveTTS(nn.Module):
         return x
 
     def encode_text(self, tokens, text_mask, budget=None, hard=False, max_steps=None,
-                    speakers=None, emotions=None):
-        x = self.embedding(tokens) * self.emb_scale
-        x = self.encoder_prenet(x, text_mask)
+                    speakers=None, emotions=None, force_full_depth=False):
+        emb = self.embedding(tokens) * self.emb_scale
+        x = self.encoder_prenet(emb, text_mask)
         x = self.pos_enc(x) * text_mask.unsqueeze(-1)
         x = self._condition(x, speakers, emotions)
-        enc = self.encoder(x, text_mask, budget=budget, hard=hard, max_steps_override=max_steps)
-        return enc
+        enc = self.encoder(x, text_mask, budget=budget, hard=hard, max_steps_override=max_steps,
+                           force_full_depth=force_full_depth)
+        return enc, emb
 
     # -- forward ----------------------------------------------------------
     def forward(
@@ -157,10 +158,11 @@ class AdaptiveTTS(nn.Module):
         decoder_max_steps: int | None = None,
         pitch_scale: float = 1.0,
         energy_scale: float = 1.0,
+        force_full_depth: bool = False,
     ) -> TTSOutput:
         text_mask = lengths_to_mask(token_lens, tokens.size(1))
-        enc = self.encode_text(tokens, text_mask, budget, hard, encoder_max_steps,
-                               speakers, emotions)
+        enc, emb = self.encode_text(tokens, text_mask, budget, hard, encoder_max_steps,
+                                    speakers, emotions, force_full_depth)
         h = enc.output
 
         attn_logprob = attn_hard = attn_soft = None
@@ -168,7 +170,13 @@ class AdaptiveTTS(nn.Module):
         training_mode = mels is not None and mel_lens is not None
 
         if training_mode and durations is None:
-            attn_logprob, _ = self.aligner(h, mels, text_mask, attn_prior)
+            # Alignment keys come from the token EMBEDDING, not the encoder
+            # output. The encoder's depth changes as the router learns, and
+            # feeding that moving representation to the aligner couples the two:
+            # in practice the alignment that had been forming was destroyed the
+            # moment routing collapsed. The embedding is stable, so alignment
+            # and compute allocation can no longer destabilise each other.
+            attn_logprob, _ = self.aligner(emb, mels, text_mask, attn_prior)
             attn_hard = monotonic_alignment_search(
                 attn_logprob.squeeze(1).float(), token_lens, mel_lens
             ).to(h.dtype)
@@ -209,7 +217,8 @@ class AdaptiveTTS(nn.Module):
         frames = self.pos_dec(frames) * mel_mask.unsqueeze(-1)
         frames = self._condition(frames, speakers, emotions)
         dec = self.decoder(frames, mel_mask, budget=budget, hard=hard,
-                           max_steps_override=decoder_max_steps)
+                           max_steps_override=decoder_max_steps,
+                           force_full_depth=force_full_depth)
 
         mel = self.mel_linear(dec.output).transpose(1, 2)
         mel = mel * mel_mask.unsqueeze(1)

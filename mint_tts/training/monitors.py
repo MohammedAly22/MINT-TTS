@@ -19,7 +19,9 @@ and it reduces all of that to a handful of scalars you can watch on a curve:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -171,6 +173,50 @@ class ComplexityProbe:
         return scalars
 
 
+@torch.no_grad()
+def alignment_diagnostics(out, batch) -> dict:
+    """Scalar health checks for the aligner.
+
+    These exist because alignment is the single thing that, when broken, makes
+    every downstream number meaningless -- and because the alignment *images*
+    are the first thing to disappear when figure export is unavailable. Watch
+    these curves, not just the loss:
+
+    align/entropy_ratio  1.0 means the soft attention is uniform, i.e. the
+                         aligner is at chance and only the prior is working.
+                         It should fall well below 0.5 and keep going.
+    align/diagonality    1.0 means the argmax path tracks the diagonal. It
+                         starts high because of the prior, so the number to
+                         trust is entropy_ratio.
+    align/hard_agreement probability mass the soft attention puts on the hard
+                         (MAS) path. Rises as the two agree.
+    """
+    logs: dict = {}
+    if out.attn_soft is None or out.attn_hard is None:
+        return logs
+    soft = out.attn_soft.float()                       # (B, T_mel, T_text)
+    tlen = batch["token_lens"].to(soft.device)
+    mlen = batch["mel_lens"].to(soft.device)
+    ent, diag, agree = [], [], []
+    for i in range(soft.size(0)):
+        t, l = int(tlen[i]), int(mlen[i])
+        if t < 2 or l < 2:
+            continue
+        p = soft[i, :l, :t]
+        p = p / p.sum(-1, keepdim=True).clamp_min(1e-9)
+        e = -(p.clamp_min(1e-9).log() * p).sum(-1).mean() / math.log(t)
+        ent.append(float(e))
+        idx = p.argmax(-1).float()
+        ref = torch.linspace(0, t - 1, l, device=soft.device)
+        diag.append(float(1.0 - (idx - ref).abs().mean() / t))
+        agree.append(float((p * out.attn_hard[i, :l, :t].float()).sum() / l))
+    if ent:
+        logs["align/entropy_ratio"] = float(np.mean(ent))
+        logs["align/diagonality"] = float(np.mean(diag))
+        logs["align/hard_agreement"] = float(np.mean(agree))
+    return logs
+
+
 def _safe_corr(x, y) -> float:
     """Pearson r, or nan when a series is constant (instead of a warning)."""
     x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
@@ -230,12 +276,27 @@ def log_training_examples(model, batch, out, logger, step: int, vocoder=None,
                 f"train/{i}/word_complexity",
                 plotting.plot_word_complexity(
                     words, aggregate_by_word(c_tok, word_ids or [], len(words))), step)
+        # Three tags, deliberately distinct. "target_vocoded" is the ground
+        # truth mel put through the SAME vocoder as the prediction: it is the
+        # ceiling this vocoder can reach, and with Griffin-Lim it already
+        # sounds rough. "target_original" is the untouched audio file. If
+        # target_vocoded sounds bad but target_original is clean, the vocoder
+        # is the limit, not the acoustic model.
         if vocoder is not None:
             try:
                 logger.log_audio(f"train/{i}/audio_pred",
                                  vocoder.to_wav(out.mel_post[i, :, :L]), step, sample_rate)
-                logger.log_audio(f"train/{i}/audio_target",
+                logger.log_audio(f"train/{i}/audio_target_vocoded",
                                  vocoder.to_wav(batch["mel"][i, :, :L]), step, sample_rate)
+            except Exception:
+                pass
+        path = (batch.get("audio_path") or [""] * (i + 1))[i]
+        if path and Path(path).exists():
+            try:
+                from ..data.audio import AudioConfig, load_wav
+
+                wav = load_wav(path, AudioConfig(sample_rate=sample_rate))
+                logger.log_audio(f"train/{i}/audio_target_original", wav, step, sample_rate)
             except Exception:
                 pass
 

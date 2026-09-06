@@ -15,6 +15,10 @@ import warnings
 import numpy as np
 import torch
 
+# MCD between two unrelated utterances, measured on LJSpeech-style log-mels.
+# Only a fallback: the trainer measures this on the actual validation set.
+DEFAULT_MCD_CHANCE = 52.0
+
 
 class MOSPredictor:
     def __init__(self, backend: str = "proxy", device: str = "cpu"):
@@ -49,21 +53,25 @@ class MOSPredictor:
         return float(self.model(wav.unsqueeze(0).to(self.device), self.sample_rate))
 
     @staticmethod
-    def proxy_from_metrics(mcd: float, cer: float | None = None) -> float:
+    def proxy_from_metrics(mcd: float, cer: float | None = None,
+                           mcd_chance: float = DEFAULT_MCD_CHANCE) -> float:
         """Map objective distortions to a 1-5 pseudo-MOS.
 
-        Calibrated so that MCD ~= 3 dB with near-zero CER lands around 4.3 and
-        MCD ~= 10 dB lands near 1.5. Use for *relative* comparisons only.
+        Anchored to `mcd_chance` (MCD between unrelated utterances) rather than
+        to a constant from the literature: this repo's MCD is computed from
+        log-mels without DTW, so its scale is its own. Relative comparisons
+        only -- this is not MOS.
         """
-        if not np.isfinite(mcd):
+        if not np.isfinite(mcd) or not np.isfinite(mcd_chance) or mcd_chance <= 0:
             return float("nan")
-        score = 5.0 - 0.42 * float(mcd)
+        score = 1.0 + 4.0 * (1.0 - float(mcd) / float(mcd_chance))
         if cer is not None and np.isfinite(cer):
             score -= 3.0 * float(cer)
         return float(np.clip(score, 1.0, 5.0))
 
 
-def quality_score(metrics: dict, weights: dict | None = None) -> float:
+def quality_score(metrics: dict, weights: dict | None = None,
+                  mcd_chance: float = DEFAULT_MCD_CHANCE) -> float:
     """Single scalar Q in [0, 1] used to locate the minimum-compute point.
 
     Combines mel distortion, intelligibility and (when available) predicted
@@ -75,8 +83,12 @@ def quality_score(metrics: dict, weights: dict | None = None) -> float:
     terms, total_w = 0.0, 0.0
 
     mcd = metrics.get("mcd", float("nan"))
-    if np.isfinite(mcd):
-        terms += w["mcd"] * float(np.clip(1.0 - (mcd - 2.0) / 8.0, 0.0, 1.0))
+    chance = float(metrics.get("mcd_chance", mcd_chance))
+    if np.isfinite(mcd) and np.isfinite(chance) and chance > 0:
+        # 1.0 = identical to the target, 0.0 = no better than an unrelated
+        # utterance. The old mapping assumed 4-8 dB literature MCD and pinned
+        # every real measurement here to exactly zero.
+        terms += w["mcd"] * float(np.clip(1.0 - mcd / chance, 0.0, 1.0))
         total_w += w["mcd"]
     c = metrics.get("cer", float("nan"))
     if np.isfinite(c):

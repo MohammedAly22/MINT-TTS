@@ -85,6 +85,7 @@ class TTSDataset(Dataset):
         tokens = torch.tensor(row["tokens"], dtype=torch.long)
         item = {
             "uid": row["uid"],
+            "audio_path": row.get("audio", ""),
             "tokens": tokens,
             "token_strings": row.get("token_strings", []),
             "word_ids": row.get("word_ids", []),
@@ -139,6 +140,7 @@ def collate(batch: list[dict]) -> dict:
 
     out = {
         "uid": [b["uid"] for b in batch],
+        "audio_path": [b.get("audio_path", "") for b in batch],
         "text": [b["text"] for b in batch],
         "token_strings": [b["token_strings"] for b in batch],
         "word_ids": [b["word_ids"] for b in batch],

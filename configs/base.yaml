@@ -73,7 +73,7 @@ model:
   postnet_kernel: 5
   min_duration: 1            # inference floor: every token gets >=1 frame
   aligner_dim: 80
-  aligner_temperature: 0.0005
+  aligner_temperature: 1.0     # initial sharpness; learned from here (see modules/aligner.py)
   n_speakers: 1              # >1 enables the speaker embedding (VCTK/LibriTTS)
   n_emotions: 1              # >1 enables the emotion embedding
 
@@ -127,7 +127,7 @@ loss:
   duration: 1.0
   pitch: 0.1
   energy: 0.1
-  forwardsum: 2.0
+  forwardsum: 1.0     # at 2.0 this term alone was ~77% of the total loss
   bin: 1.0
   bin_start_step: 6000
   bin_warmup_steps: 6000
@@ -137,6 +137,9 @@ loss:
     lambda_max: 0.05         # strength of the compute penalty
     lambda_floor: 0.02       # penalty that survives even at q = 1
     warmup_steps: 8000       # learn to speak first, then apply compute pressure
+    router_start_step: null  # defaults to warmup_steps: routing is held at full
+                             # depth until then, so an unpenalised router cannot
+                             # collapse to a constant and destabilise alignment
     ramp_steps: 6000
     q_exponent: 1.0
     q_range: [0.0, 1.0]      # quality budget sampled per training example
@@ -187,6 +190,8 @@ eval:
   n_audio_eval: 2
   compute_curve_points: [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
   quality_threshold_ratio: 0.98   # C* = cheapest compute reaching 98% of max quality
+  mcd_chance_utterances: 24       # val clips used to measure the no-information MCD
+  mcd_chance_pairs: 40
 
 # -- vocoder (FIXED across all experiments) -----------------------------------
 vocoder:
