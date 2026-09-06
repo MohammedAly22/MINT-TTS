@@ -1,0 +1,10 @@
+# Token-adaptive MINT-TTS on VCTK (multi-speaker).
+_base_: [base.yaml, dataset_vctk.yaml]
+
+log:
+  run_name: vctk_token
+  wandb_tags: [adaptive, token, vctk, multispeaker]
+
+model:
+  encoder: { routing: token, share_weights: true }
+  decoder: { routing: fixed, share_weights: true }

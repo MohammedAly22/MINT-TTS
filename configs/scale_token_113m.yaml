@@ -1,0 +1,16 @@
+# Scaling probe -- token-adaptive, shared blocks, ~113M parameters.
+# Parameter-matched to scale_dense_115m.yaml.
+_base_: exp2_token.yaml
+
+log:
+  run_name: scale_token_113m
+  wandb_tags: [adaptive, token, scale]
+
+model:
+  d_model: 1536
+  encoder: { n_heads: 16, ff_dim: 6144, router_hidden: 768 }
+  decoder: { n_heads: 16, ff_dim: 6144, router_hidden: 768 }
+
+train:
+  batch_size: 8
+  grad_accum: 2

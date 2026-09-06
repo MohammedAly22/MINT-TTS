@@ -1,0 +1,17 @@
+# Scaling probe -- dense, independent blocks, ~116M parameters.
+# Phase 2 question: does the relative saving grow or shrink with scale?
+# Pair with scale_token_113m.yaml (parameter-matched shared adaptive model).
+_base_: exp0_dense.yaml
+
+log:
+  run_name: scale_dense_115m
+  wandb_tags: [dense, scale]
+
+model:
+  d_model: 768
+  encoder: { n_heads: 8, ff_dim: 3072 }
+  decoder: { n_heads: 8, ff_dim: 3072 }
+
+train:
+  batch_size: 8
+  grad_accum: 2

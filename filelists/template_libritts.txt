@@ -1,0 +1,4 @@
+train-clean-100/19/198/19_198_000000_000000.wav|19|This is a LibriTTS utterance with proper casing and punctuation.
+train-clean-100/19/198/19_198_000001_000001.wav|19|I read a book yesterday, and I will read another one tomorrow.
+train-clean-100/26/495/26_495_000004_000000.wav|26|The record is broken by the record broker.
+train-clean-360/32/21631/32_21631_000012_000003.wav|32|She sells seashells by the seashore.

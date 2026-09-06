@@ -1,0 +1,15 @@
+# LJSpeech-1.1 -- 24 h, one speaker. The Phase 1 corpus.
+#   python scripts/prepare_dataset.py --dataset ljspeech --root data/LJSpeech-1.1
+data:
+  root: data/LJSpeech-1.1
+  manifest: filelists/ljspeech_all.txt
+  columns: [audio, text]
+  preprocessed_dir: data/preprocessed/ljspeech
+  train_index: data/preprocessed/ljspeech/train.jsonl
+  val_index: data/preprocessed/ljspeech/val.jsonl
+  test_index: data/preprocessed/ljspeech/test.jsonl
+  max_frames: 1000
+
+model:
+  n_speakers: 1
+  n_emotions: 1

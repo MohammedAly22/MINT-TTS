@@ -1,0 +1,12 @@
+# Experiment 3 -- Adaptive depth with INDEPENDENT weights per step.
+# Pair this with exp2_token (shared weights) to answer: does parameter reuse
+# buy the same quality at a fraction of the parameters?
+_base_: exp2_token.yaml
+
+log:
+  run_name: exp3_independent
+  wandb_tags: [adaptive, token, independent]
+
+model:
+  encoder: { share_weights: false }
+  decoder: { share_weights: false }

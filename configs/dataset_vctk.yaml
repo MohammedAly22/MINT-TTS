@@ -1,0 +1,21 @@
+# VCTK 0.92 -- ~44 h, 110 speakers, many accents.
+# Phase 2 question: does the compute policy transfer across speakers, or does
+# the router just memorise per-speaker depth?
+#   python scripts/prepare_dataset.py --dataset vctk --root data/VCTK-Corpus-0.92
+data:
+  root: data/VCTK-Corpus-0.92
+  manifest: filelists/vctk_all.txt
+  columns: [audio, speaker, text]
+  preprocessed_dir: data/preprocessed/vctk
+  train_index: data/preprocessed/vctk/train.jsonl
+  val_index: data/preprocessed/vctk/val.jsonl
+  test_index: data/preprocessed/vctk/test.jsonl
+  max_frames: 900
+
+model:
+  n_speakers: auto        # read from stats.json at train time
+  n_emotions: 1
+
+train:
+  batch_size: 16
+  max_steps: 300000

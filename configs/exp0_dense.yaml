@@ -1,0 +1,16 @@
+# Experiment 0 -- Dense baseline.
+# Identical code path, routing disabled: every token takes every step.
+# This is the quality ceiling and the FLOP reference all adaptive runs are
+# measured against.
+_base_: base.yaml
+
+log:
+  run_name: exp0_dense
+  wandb_tags: [dense, baseline]
+
+model:
+  encoder: { routing: fixed, share_weights: false }
+  decoder: { routing: fixed, share_weights: false }
+
+loss:
+  compute: { enabled: false }

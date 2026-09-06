@@ -1,0 +1,23 @@
+# Core -- everything needed to preprocess, train, evaluate and benchmark.
+torch>=2.1
+torchaudio>=2.1
+numpy>=1.24
+PyYAML>=6.0
+tqdm>=4.65
+soundfile>=0.12
+tensorboard>=2.14
+
+# Figures: plotly draws them, kaleido rasterises them for TensorBoard.
+plotly>=5.18
+kaleido>=0.2.1
+pillow>=10.0
+
+# Text frontend.
+#   num2words  -- number/ordinal/currency verbalisation
+#   phonemizer + espeakng-loader -- IPA via espeak-ng, no system package needed
+#   g2p_en + nltk -- ARPAbet with POS-aware homograph handling
+num2words>=0.5.13
+phonemizer>=3.2
+espeakng-loader>=0.2
+g2p_en>=2.1
+nltk>=3.8

@@ -1,0 +1,22 @@
+# Frontend ablation -- ipa: espeak-ng phonemes; context-free per word.
+#
+# The three frontend_*.yaml configs are otherwise identical, so the difference
+# between their runs is attributable to the input representation alone.
+# Preprocess each into its own directory: the vocabularies differ.
+#
+#   python scripts/preprocess.py --config configs/frontend_ipa.yaml --workers 4
+#   python scripts/train.py      --config configs/frontend_ipa.yaml
+_base_: exp2_token.yaml
+
+text:
+  input_type: ipa
+
+data:
+  preprocessed_dir: data/preprocessed/ljspeech_ipa
+  train_index: data/preprocessed/ljspeech_ipa/train.jsonl
+  val_index: data/preprocessed/ljspeech_ipa/val.jsonl
+  test_index: data/preprocessed/ljspeech_ipa/test.jsonl
+
+log:
+  run_name: frontend_ipa
+  wandb_tags: [adaptive, token, frontend, ipa]

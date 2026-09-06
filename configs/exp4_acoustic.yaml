@@ -1,0 +1,14 @@
+# Experiment 4 -- Acoustic (frame-level) adaptive computation.
+# Silence and steady vowels should cost far less than transients.
+_base_: base.yaml
+
+log:
+  run_name: exp4_acoustic
+  wandb_tags: [adaptive, acoustic]
+
+model:
+  encoder: { routing: fixed, share_weights: true }
+  decoder: { routing: token, share_weights: true }
+
+loss:
+  compute: { encoder_weight: 0.0, decoder_weight: 1.0 }

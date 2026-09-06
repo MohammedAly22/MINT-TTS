@@ -1,0 +1,22 @@
+# Frontend ablation -- char: raw graphemes; every ambiguity reaches the model.
+#
+# The three frontend_*.yaml configs are otherwise identical, so the difference
+# between their runs is attributable to the input representation alone.
+# Preprocess each into its own directory: the vocabularies differ.
+#
+#   python scripts/preprocess.py --config configs/frontend_char.yaml --workers 4
+#   python scripts/train.py      --config configs/frontend_char.yaml
+_base_: exp2_token.yaml
+
+text:
+  input_type: char
+
+data:
+  preprocessed_dir: data/preprocessed/ljspeech_char
+  train_index: data/preprocessed/ljspeech_char/train.jsonl
+  val_index: data/preprocessed/ljspeech_char/val.jsonl
+  test_index: data/preprocessed/ljspeech_char/test.jsonl
+
+log:
+  run_name: frontend_char
+  wandb_tags: [adaptive, token, frontend, char]

@@ -1,0 +1,3 @@
+{"audio": "wavs/0001.wav", "text": "The record is broken by the record broker.", "speaker": "spk01", "emotion": "neutral", "lang": "en", "style": "news anchor, measured pace"}
+{"audio": "wavs/0002.wav", "text": "I read a book yesterday.", "speaker": "spk01", "emotion": "neutral", "lang": "en", "style": ""}
+{"audio": "wavs/0003.wav", "text": "Hello, how are you doing?", "speaker": "spk02", "emotion": "happy", "lang": "en", "style": "conversational"}

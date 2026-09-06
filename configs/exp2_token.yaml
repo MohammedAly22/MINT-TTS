@@ -1,0 +1,12 @@
+# Experiment 2 -- Token-level adaptive computation (linguistic routing).
+# The headline experiment: compute is allocated per token, so "record" can be
+# expensive while "the" is cheap inside the same utterance.
+_base_: base.yaml
+
+log:
+  run_name: exp2_token
+  wandb_tags: [adaptive, token]
+
+model:
+  encoder: { routing: token, share_weights: true }
+  decoder: { routing: fixed, share_weights: true }

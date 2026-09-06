@@ -1,0 +1,11 @@
+# Token-adaptive MINT-TTS on LibriTTS (scale + speaker diversity).
+_base_: [base.yaml, dataset_libritts.yaml]
+
+log:
+  run_name: libritts_token
+  wandb_tags: [adaptive, token, libritts, multispeaker]
+
+model:
+  d_model: 512
+  encoder: { routing: token, share_weights: true, n_heads: 8, ff_dim: 2048, router_hidden: 256 }
+  decoder: { routing: fixed, share_weights: true, n_heads: 8, ff_dim: 2048, router_hidden: 256 }

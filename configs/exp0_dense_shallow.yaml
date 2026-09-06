@@ -1,0 +1,12 @@
+# Experiment 0b -- a *smaller* dense baseline (half the depth).
+# The adaptive model's claim is: quality of the deep dense model, cost closer
+# to this one. Without this row the comparison is not falsifiable.
+_base_: exp0_dense.yaml
+
+log:
+  run_name: exp0_dense_shallow
+  wandb_tags: [dense, baseline, shallow]
+
+model:
+  encoder: { max_steps: 4 }
+  decoder: { max_steps: 3 }

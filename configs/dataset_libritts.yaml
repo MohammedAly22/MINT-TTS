@@ -1,0 +1,23 @@
+# LibriTTS -- up to 585 h, 2400+ speakers. The scalability check.
+# Start with train-clean-100 before committing to the full set:
+#   python scripts/prepare_dataset.py --dataset libritts --root data/LibriTTS \
+#       --subsets train-clean-100
+data:
+  root: data/LibriTTS
+  manifest: filelists/libritts_all.txt
+  columns: [audio, speaker, text]
+  preprocessed_dir: data/preprocessed/libritts
+  train_index: data/preprocessed/libritts/train.jsonl
+  val_index: data/preprocessed/libritts/val.jsonl
+  test_index: data/preprocessed/libritts/test.jsonl
+  max_frames: 1000
+  min_frames: 48
+
+model:
+  n_speakers: auto
+  n_emotions: 1
+
+train:
+  batch_size: 24
+  max_steps: 500000
+  num_workers: 4

@@ -1,0 +1,16 @@
+# Experiment 2b -- token-adaptive, PARAMETER-MATCHED to exp0_dense (~31M).
+#
+# exp2_token shares one block, so it is ~3x smaller than the dense baseline.
+# That makes "adaptive is cheaper" partly a statement about model size rather
+# than about routing. This config widens the shared model until the parameter
+# counts agree, so the only difference left is *how* compute is allocated.
+_base_: exp2_token.yaml
+
+log:
+  run_name: exp2_token_matched
+  wandb_tags: [adaptive, token, matched]
+
+model:
+  d_model: 768
+  encoder: { n_heads: 8, ff_dim: 3072, router_hidden: 384 }
+  decoder: { n_heads: 8, ff_dim: 3072, router_hidden: 384 }

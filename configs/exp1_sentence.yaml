@@ -1,0 +1,13 @@
+# Experiment 1 -- Sentence-level adaptive computation.
+# One halting decision per utterance: the cheapest possible version of the
+# hypothesis. If this does not beat the dense baseline on the
+# quality-per-FLOP trade-off, nothing more elaborate will.
+_base_: base.yaml
+
+log:
+  run_name: exp1_sentence
+  wandb_tags: [adaptive, sentence]
+
+model:
+  encoder: { routing: sentence, share_weights: true }
+  decoder: { routing: fixed, share_weights: true }

@@ -1,0 +1,7 @@
+audio,speaker,emotion,text
+wavs/0001.wav,spk01,neutral,"The meeting has been moved to three o'clock."
+wavs/0002.wav,spk01,happy,"We got the grant! I still can't believe it."
+wavs/0003.wav,spk01,sad,"She left before anyone could say goodbye."
+wavs/0004.wav,spk01,angry,"I told you twice already, and you still ignored me."
+wavs/0005.wav,spk02,surprised,"You did what with the record?"
+wavs/0006.wav,spk02,neutral,"Please present the present to the presenter."

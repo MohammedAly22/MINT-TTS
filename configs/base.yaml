@@ -1,0 +1,271 @@
+# =============================================================================
+# Adaptive Speech -- base configuration
+# Every experiment config inherits from this file via `_base_: base.yaml`
+# and overrides only what it changes, so comparisons stay controlled.
+# =============================================================================
+
+seed: 1234
+
+# -- audio / mel front end (HiFi-GAN LJSpeech recipe) -------------------------
+audio:
+  sample_rate: 22050
+  n_fft: 1024
+  hop_length: 256
+  win_length: 1024
+  n_mels: 80
+  fmin: 0.0
+  fmax: 8000.0
+  center: false
+  clip_val: 1.0e-5
+  trim_silence: true
+  trim_top_db: 60.0
+  extract_pitch: true
+
+# -- text frontend -----------------------------------------------------------
+# Which frontend you pick changes what the model has to learn. Run
+#   python scripts/inspect_frontend.py
+# to see how each one handles homographs before committing to one.
+#   char    : raw graphemes -- every ambiguity reaches the model intact
+#   ipa     : espeak-ng phonemes -- phonetic, but context-free per word
+#   arpabet : g2p_en -- POS-aware, attempts homograph disambiguation
+text:
+  input_type: ipa
+  lowercase: true
+  keep_punctuation: "!'(),-.:;?\""
+  add_bos_eos: true
+  add_word_boundary: true
+  add_punctuation: true
+  allow_vocab_growth: true       # preprocessing grows it; training freezes it
+  symbols_file: null             # written by preprocessing into preprocessed_dir
+  skip_normalisation_steps: []   # e.g. [acronyms] to leave capitals alone
+  phonemizer:
+    language: en-us
+    with_stress: true
+
+# -- data ---------------------------------------------------------------------
+data:
+  root: data/LJSpeech-1.1
+  manifest: filelists/ljspeech_all.txt
+  columns: [audio, text]           # pipe-filelist column order
+  delimiter: "|"
+  preprocessed_dir: data/preprocessed/ljspeech
+  train_index: data/preprocessed/ljspeech/train.jsonl
+  val_index: data/preprocessed/ljspeech/val.jsonl
+  test_index: data/preprocessed/ljspeech/test.jsonl
+  val_size: 200
+  test_size: 200
+  max_frames: 1000
+  min_frames: 32
+  max_tokens: 300
+  bucket_by_length: true
+  use_attn_prior: true
+  attn_prior_scaling: 1.0
+
+# -- model --------------------------------------------------------------------
+model:
+  d_model: 384
+  dropout: 0.1
+  max_positions: 8192
+  prenet_layers: 3
+  prenet_kernel: 5
+  postnet_layers: 5
+  postnet_hidden: 256
+  postnet_kernel: 5
+  min_duration: 1            # inference floor: every token gets >=1 frame
+  aligner_dim: 80
+  aligner_temperature: 0.0005
+  n_speakers: 1              # >1 enables the speaker embedding (VCTK/LibriTTS)
+  n_emotions: 1              # >1 enables the emotion embedding
+
+  encoder:                   # linguistic stack -- routes per *token*
+    routing: token           # fixed | sentence | token
+    max_steps: 8
+    min_steps: 1
+    share_weights: true      # Universal-Transformer style weight reuse
+    n_heads: 6
+    ff_dim: 1536
+    ffn_type: linear         # must stay `linear` for the gathered fast path
+    dropout: 0.1
+    act_epsilon: 0.01
+    router_hidden: 192
+    router_init_bias: -1.0
+    step_embedding: true
+    budget_conditioning: true
+    n_budget: 2
+
+  decoder:                   # acoustic stack -- routes per *frame*
+    routing: fixed           # Experiment 4 flips this to `token`
+    max_steps: 6
+    min_steps: 1
+    share_weights: true
+    n_heads: 6
+    ff_dim: 1536
+    ffn_type: linear
+    dropout: 0.1
+    act_epsilon: 0.01
+    router_hidden: 192
+    router_init_bias: -1.0
+    step_embedding: true
+    budget_conditioning: true
+    n_budget: 2
+
+  variance:
+    use_pitch: true
+    use_energy: true
+    hidden: 256
+    layers: 2
+    kernel: 3
+    dropout: 0.5
+    n_bins: 256
+    pitch_range: [-4.0, 4.0]     # values are z-normalised in preprocessing
+    energy_range: [-4.0, 4.0]
+
+# -- losses -------------------------------------------------------------------
+loss:
+  mel: 1.0
+  mel_post: 1.0
+  duration: 1.0
+  pitch: 0.1
+  energy: 0.1
+  forwardsum: 2.0
+  bin: 1.0
+  bin_start_step: 6000
+  bin_warmup_steps: 6000
+
+  compute:
+    enabled: true
+    lambda_max: 0.05         # strength of the compute penalty
+    lambda_floor: 0.02       # penalty that survives even at q = 1
+    warmup_steps: 8000       # learn to speak first, then apply compute pressure
+    ramp_steps: 6000
+    q_exponent: 1.0
+    q_range: [0.0, 1.0]      # quality budget sampled per training example
+    h_range: [0.3, 1.0]      # hardware budget sampled per training example
+    use_hardware_cap: true
+    hardware_weight: 0.5
+    encoder_weight: 1.0
+    decoder_weight: 1.0
+    target_compute: null     # set a float to pin mean compute (ablations)
+    target_weight: 0.0
+    diversity_weight: 0.0    # >0 rewards spread in per-token depth
+    c_star_weight: 0.0       # >0 distils scripts/compute_curve.py labels into the router
+
+# -- training -----------------------------------------------------------------
+train:
+  output_dir: runs
+  device: auto
+  batch_size: 16
+  eval_batch_size: 8
+  num_workers: 2
+  pin_memory: true
+  max_steps: 200000
+  lr: 1.0e-3
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  weight_decay: 0.01
+  grad_clip: 1.0
+  grad_accum: 1
+  amp: true
+  bf16: false
+  use_ema: true
+  ema_decay: 0.999
+  eval_with_ema: true
+  val_every: 2000
+  val_batches: 10
+  save_every: 5000
+  keep_checkpoints: 3
+  deterministic: false
+  scheduler:
+    name: noam
+    warmup_steps: 4000
+
+# -- evaluation ---------------------------------------------------------------
+eval:
+  asr_backend: none          # none | wav2vec2 | whisper  (wav2vec2 downloads once)
+  mos_backend: proxy         # proxy | utmos
+  quality_budget: 0.9
+  n_audio_eval: 2
+  compute_curve_points: [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+  quality_threshold_ratio: 0.98   # C* = cheapest compute reaching 98% of max quality
+
+# -- vocoder (FIXED across all experiments) -----------------------------------
+vocoder:
+  name: griffin_lim          # switch to `hifigan` once the checkpoint is downloaded
+  variant: v1
+  checkpoint: pretrained/hifigan/generator_v1
+  config: pretrained/hifigan/config.json
+  require_checkpoint: false
+  griffin_lim_iters: 32
+
+# -- benchmarking -------------------------------------------------------------
+benchmark:
+  devices: [cpu]
+  batch_sizes: [1]
+  warmup_iters: 3
+  iters: 20
+  threads: 4
+  budgets: [0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
+
+# -- logging / monitoring -----------------------------------------------------
+log:
+  run_name: base
+  backends: [tensorboard]    # add "wandb" to mirror everything to W&B
+  wandb_project: adaptive-speech
+  wandb_entity: null
+  wandb_tags: []
+  log_every: 50
+  # Figures are rasterised for TensorBoard with kaleido, which costs ~0.6 s
+  # each even when batched. These defaults keep monitoring under ~1% of
+  # training time; lower them freely when logging to W&B, which renders
+  # plotly natively and pays nothing.
+  figure_every: 2000
+  probe_every: 2000
+  figure_scale: 1.6
+  n_figure_examples: 2
+  log_audio: true
+  probe_audio: true
+  probe_hard_routing: true
+  probe_budgets: [0.2, 0.5, 0.9]
+  probe_max_figures: 4
+
+  # Probe sentences: the qualitative evidence for the hypothesis.
+  # `ambiguous_words` drives the scalar `probe/contrast` metric.
+  test_sentences:
+    - text: "Hello, how are you doing?"
+      group: easy
+      note: "short, unambiguous, high-frequency vocabulary"
+    - text: "The record is broken by the record broker."
+      group: homograph
+      ambiguous_words: [record]
+      note: "same spelling, two pronunciations, disambiguated only by syntax"
+    - text: "I read a book yesterday, and I will read another one tomorrow."
+      group: homograph
+      ambiguous_words: [read]
+      note: "tense must be inferred from the temporal adverb"
+    - text: "They will desert us in the desert."
+      group: homograph
+      ambiguous_words: [desert]
+    - text: "The wind was too strong to wind the sail."
+      group: homograph
+      ambiguous_words: [wind]
+    - text: "He decided to lead the team into the lead mine."
+      group: homograph
+      ambiguous_words: [lead]
+    - text: "The bass player caught a large bass."
+      group: homograph
+      ambiguous_words: [bass]
+    - text: "Please present the present to the presenter."
+      group: homograph
+      ambiguous_words: [present]
+    - text: "A live broadcast about the animals that live here."
+      group: homograph
+      ambiguous_words: [live]
+    - text: "I went to the store and I bought some milk and some bread and some eggs."
+      group: long_easy
+      note: "long but trivial -- length must NOT imply compute"
+    - text: "She sells seashells by the seashore."
+      group: phonetic
+      note: "hard phonetics, easy semantics"
+    - text: "Doctor Smith paid one thousand dollars on March third."
+      group: normalisation
+      note: "checks the text frontend as much as the router"

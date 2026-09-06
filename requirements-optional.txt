@@ -1,0 +1,7 @@
+# Optional extras. None of these are needed for the first experiment.
+wandb>=0.16                # second logging backend, keeps plotly figures interactive
+huggingface_hub>=0.20      # scripts/download_vocoder.py --hf-repo
+faster-whisper>=1.0        # eval.asr_backend: whisper
+pyworld>=0.3               # higher quality F0 than the built-in extractor
+pytest>=7.4                # test suite
+pyflakes>=3.0              # lint

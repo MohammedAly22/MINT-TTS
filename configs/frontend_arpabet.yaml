@@ -1,0 +1,22 @@
+# Frontend ablation -- arpabet: g2p_en; POS-aware homograph attempts.
+#
+# The three frontend_*.yaml configs are otherwise identical, so the difference
+# between their runs is attributable to the input representation alone.
+# Preprocess each into its own directory: the vocabularies differ.
+#
+#   python scripts/preprocess.py --config configs/frontend_arpabet.yaml --workers 4
+#   python scripts/train.py      --config configs/frontend_arpabet.yaml
+_base_: exp2_token.yaml
+
+text:
+  input_type: arpabet
+
+data:
+  preprocessed_dir: data/preprocessed/ljspeech_arpabet
+  train_index: data/preprocessed/ljspeech_arpabet/train.jsonl
+  val_index: data/preprocessed/ljspeech_arpabet/val.jsonl
+  test_index: data/preprocessed/ljspeech_arpabet/test.jsonl
+
+log:
+  run_name: frontend_arpabet
+  wandb_tags: [adaptive, token, frontend, arpabet]
