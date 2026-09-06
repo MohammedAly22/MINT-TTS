@@ -7,13 +7,11 @@ tqdm>=4.65
 soundfile>=0.12
 tensorboard>=2.14
 
-# Figures: plotly draws them, kaleido rasterises them for TensorBoard.
-# These two MUST be compatible: kaleido 1.x requires plotly >= 6.1.1, and
-# Colab ships plotly 5.24 preinstalled. A mismatch silently disables every
-# image in TensorBoard, so the floor is pinned rather than left open.
-plotly>=6.1.1
-kaleido>=1.0
-pillow>=10.0
+# Figures. matplotlib is the default renderer and needs nothing external.
+# The interactive plotly backend (log.figure_backend: plotly) is optional --
+# see requirements-optional.txt -- because rasterising it for TensorBoard
+# needs kaleido, which drives a Chrome install Colab does not ship.
+matplotlib>=3.7
 
 # Text frontend.
 #   num2words  -- number/ordinal/currency verbalisation

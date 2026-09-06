@@ -13,6 +13,8 @@ from pathlib import Path
 
 import numpy as np
 
+from . import plotting
+from .plotting import close as close_fig
 from .plotting import to_image_arrays
 
 _LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
@@ -42,6 +44,7 @@ class ExperimentLogger:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.figure_scale = float(cfg.log.get("figure_scale", 1.6))
+        self.figure_backend = plotting.set_backend(cfg.log.get("figure_backend", "matplotlib"))
         self._warned_kaleido = False
         self._pending: list[tuple] = []
         backends = cfg.log.get("backends", ["tensorboard"])
@@ -100,10 +103,21 @@ class ExperimentLogger:
         figure is rasterised with kaleido and logged as an image. If kaleido
         is missing we say so once rather than silently dropping the panel.
         """
+        is_plotly = fig.__class__.__module__.startswith("plotly")
         if self.wandb is not None:
-            self.wandb.log({tag: self.wandb.Plotly(fig)}, step=step)
-        if self.tb is not None:
-            self._pending.append((tag, fig, step))
+            self.wandb.log(
+                {tag: (self.wandb.Plotly(fig) if is_plotly else self.wandb.Image(fig))},
+                step=step,
+            )
+        if self.tb is None:
+            if not is_plotly:
+                close_fig(fig)
+            return
+        if is_plotly:
+            self._pending.append((tag, fig, step))   # batched, kaleido is slow
+        else:
+            # TensorBoard rasterises matplotlib itself: no browser, no kaleido.
+            self.tb.add_figure(tag, fig, step, close=True)
 
     def flush_figures(self) -> None:
         """Rasterise and write every buffered figure in one batch.

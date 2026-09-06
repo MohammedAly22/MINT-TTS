@@ -7,20 +7,27 @@ python scripts/train.py --config configs/exp2_token.yaml \
     --override "log.backends=['tensorboard','wandb']" log.wandb_project=mint-tts
 ```
 
-## Before anything else: can you see images?
+## Figures
 
-If TensorBoard shows no **IMAGES** tab, figure export is broken and you are
-flying blind on alignment and the complexity heatmaps. The usual cause is a
-plotly/kaleido version mismatch — kaleido 1.x needs plotly ≥ 6.1.1, and some
-environments (Colab) preinstall plotly 5.x:
+The default renderer is **matplotlib**, which draws straight into TensorBoard
+with no external binary. The trainer confirms it at startup:
 
-```bash
-pip install -U 'plotly>=6.1.1' 'kaleido>=1.0'   # then restart the runtime
+```
+Figures: matplotlib backend, TensorBoard IMAGES tab will work.
 ```
 
-The trainer checks this at startup and warns loudly. Training is still valid
-without it — the `align/*` scalars below cover the critical diagnosis — but
-fix it if you can.
+An interactive **plotly** backend is available (`log.figure_backend: plotly`):
+hovering a heatmap cell reads `token='ɹ' word='record' depth=6.0/8`, which is
+excellent in W&B. Its TensorBoard path goes through kaleido, and kaleido 1.x
+drives a real Chrome install — absent on a stock Colab runtime, and the reason
+it is not the default:
+
+```bash
+pip install 'plotly>=6.1.1' 'kaleido>=1.0' && plotly_get_chrome -y
+```
+
+Either way the `align/*` scalars below carry the critical diagnosis, so a
+figure problem never blocks a run.
 
 ## What the model actually produces
 

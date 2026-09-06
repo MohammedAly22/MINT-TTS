@@ -72,6 +72,11 @@ fixed; the run itself was diagnostic, not wasted.
       `audio_target_original` (the untouched file), so the vocoder's ceiling is
       distinguishable from the model's error.
 - [x] LR scheduler no longer advances on an AMP-skipped step.
+- [x] **Figures no longer need a browser.** The plotly/kaleido path failed on
+      Colab twice: first a version mismatch, then kaleido 1.x requiring a Chrome
+      install Colab does not ship. matplotlib is now the default renderer
+      (~39 ms/figure vs ~600 ms, nothing external); plotly stays available as
+      `log.figure_backend: plotly` for interactive figures in W&B.
 
 ## Phase 1 — test the hypothesis on LJSpeech (24 h, single speaker)
 

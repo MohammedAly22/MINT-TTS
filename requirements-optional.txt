@@ -5,3 +5,10 @@ faster-whisper>=1.0        # eval.asr_backend: whisper
 pyworld>=0.3               # higher quality F0 than the built-in extractor
 pytest>=7.4                # test suite
 pyflakes>=3.0              # lint
+
+# Interactive figures (log.figure_backend: plotly). Hovering a heatmap cell
+# shows token/word/depth. Perfect with wandb, which renders plotly natively.
+# For TensorBoard these also need Chrome, installable with `plotly_get_chrome`.
+plotly>=6.1.1
+kaleido>=1.0
+pillow>=10.0

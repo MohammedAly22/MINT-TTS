@@ -173,26 +173,26 @@ class Trainer:
         """
         if self.logger.tb is None or not self.cfg.log.get("check_figure_export", True):
             return
-        import plotly.graph_objects as go
+        from ..utils import plotting
 
-        from ..utils.plotting import to_image_arrays
-
-        if to_image_arrays([go.Figure(go.Scatter(x=[0, 1], y=[0, 1]))])[0] is not None:
-            return
+        backend = plotting.backend()
         try:
-            import kaleido
-            import plotly
-
-            detail = f"plotly {plotly.__version__} + kaleido {kaleido.__version__}"
+            fig = plotting.plot_scatter([0, 1], [0.0, 1.0], "x", "y", "self-check")
+            ok = plotting.to_image_array(fig) is not None
+            plotting.close(fig)
         except Exception:
-            detail = "kaleido not installed"
+            ok = False
+        if ok:
+            self.log.info(f"Figures: {backend} backend, TensorBoard IMAGES tab will work.")
+            return
         self.log.warning(
-            "FIGURE EXPORT IS BROKEN (%s). TensorBoard will have no IMAGES tab: "
-            "no alignment plots, no complexity heatmaps. Fix with "
-            "`pip install -U 'plotly>=6.1.1' 'kaleido>=1.0'` (then restart the "
-            "runtime), or add 'wandb' to log.backends, which renders plotly "
-            "natively. Scalar diagnostics under align/* still work either way.",
-            detail,
+            "FIGURE EXPORT IS BROKEN with the '%s' backend, so TensorBoard will "
+            "have no IMAGES tab: no alignment plots, no complexity heatmaps. "
+            "Set log.figure_backend=matplotlib (the default, needs no browser). "
+            "The plotly backend rasterises through kaleido, which drives a real "
+            "Chrome install that Colab does not ship. Scalar diagnostics under "
+            "align/* work either way.",
+            backend,
         )
 
     # -- setup logging ----------------------------------------------------

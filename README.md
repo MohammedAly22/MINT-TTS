@@ -261,13 +261,15 @@ Every `log.probe_every` steps the trainer runs a fixed probe set and logs:
 | **`probe/contrast`** | one number: compute on ambiguous words minus the rest |
 | **`probe/length_corr`** | correlation of compute with length — near 1.0 means the model cheated |
 | `train/*/alignment_soft`, `alignment_hard` | aligner health; check this first when a run misbehaves |
-| `val/mcd`, `val/wer`, `val/cer`, `val/quality_score` | quality |
+| `align/entropy_ratio` | **check first**: ~1.0 means the aligner is at chance and nothing downstream is meaningful |
+| `val/mcd_vs_chance` | ≥ 1.0 means the output carries no utterance-specific information |
+| `val/wer`, `val/cer`, `val/quality_score` | quality |
 | `compute/*`, `train/flops_saving` | what the compute penalty is doing |
 
-Figures are plotly: hovering a heatmap cell reads
-`token='r'  word='record'  depth=6.0/8`. W&B renders them interactively;
-TensorBoard gets them rasterised via kaleido, batched so monitoring stays
-around 1% of training time. Standalone runs also write `.html` next to `.png`.
+Figures render with matplotlib by default — straight into TensorBoard, no
+external binary. Set `log.figure_backend: plotly` for interactive versions
+(hovering a cell reads `token='r' word='record' depth=6.0/8`), which is ideal
+with W&B; its TensorBoard path additionally needs kaleido and a Chrome install.
 
 Details: [`docs/MONITORING.md`](docs/MONITORING.md).
 

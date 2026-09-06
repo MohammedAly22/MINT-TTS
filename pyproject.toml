@@ -17,9 +17,7 @@ dependencies = [
     "tqdm>=4.65",
     "soundfile>=0.12",
     "tensorboard>=2.14",
-    "plotly>=6.1.1",
-    "kaleido>=1.0",
-    "pillow>=10.0",
+    "matplotlib>=3.7",
     "num2words>=0.5.13",
     "phonemizer>=3.2",
     "espeakng-loader>=0.2",
@@ -29,6 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 extras = ["wandb>=0.16", "huggingface_hub>=0.20", "faster-whisper>=1.0", "pyworld>=0.3"]
+figures = ["plotly>=6.1.1", "kaleido>=1.0", "pillow>=10.0"]
 dev = ["pytest>=7.4", "pyflakes>=3.0"]
 
 [tool.setuptools.packages.find]

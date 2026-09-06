@@ -225,6 +225,10 @@ log:
   # plotly natively and pays nothing.
   figure_every: 2000
   probe_every: 2000
+  # matplotlib renders straight into TensorBoard with no external binary.
+  # "plotly" is interactive (hover shows token/word/depth) and ideal with
+  # wandb, but its TensorBoard path needs kaleido + a real Chrome install.
+  figure_backend: matplotlib
   figure_scale: 1.6
   n_figure_examples: 2
   log_audio: true
