@@ -1,19 +1,35 @@
+# NOTE: paths below are anchored with a leading "/" on purpose. An unanchored
+# pattern like "data/" matches at ANY depth, which would silently exclude the
+# mint_tts/data/ package as well as the corpus directory.
+
+# corpora, runs and generated artefacts (repo root only)
+/data/
+/runs/
+/outputs/
+/pretrained/
+/wandb/
+/benchmarks/
+/filelists/*_train.txt
+/filelists/*_val.txt
+/filelists/*_test.txt
+/filelists/*_all.txt
+
+# python
 __pycache__/
 *.py[cod]
+*.egg-info/
+/build/
+/dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# environments
 .venv/
 venv/
 .env
-data/
-runs/
-outputs/
-benchmarks/*.csv
-pretrained/
-wandb/
+
+# generated media and figures
 *.wav
-.pytest_cache/
-.ipynb_checkpoints/
-*.egg-info/
-build/
-dist/
+*.flac
+*.npy
 *.html
-!notebooks/*.ipynb
