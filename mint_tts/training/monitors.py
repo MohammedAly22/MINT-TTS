@@ -66,7 +66,8 @@ class ComplexityProbe:
         self.log_audio = bool(cfg.log.get("probe_audio", True))
 
     @torch.inference_mode()
-    def run(self, model, logger, step: int, vocoder=None, hard: bool = True) -> dict:
+    def run(self, model, logger, step: int, vocoder=None, hard: bool = True,
+            routing_frozen: bool = False) -> dict:
         was_training = model.training
         model.eval()
         scalars: dict[str, float] = {}
@@ -82,7 +83,11 @@ class ComplexityProbe:
             lens = torch.tensor([len(enc.ids)], dtype=torch.long, device=self.device)
             for q in self.budgets:
                 budget = torch.tensor([[float(q), 1.0]], device=self.device)
-                out = model(tokens, lens, budget=budget, hard=hard)
+                # Mirror training: while routing is frozen the router is bypassed
+                # entirely, so probing it would report a policy the model is not
+                # being trained with.
+                out = model(tokens, lens, budget=budget, hard=hard,
+                            force_full_depth=routing_frozen)
                 enc_r, dec_r = out.encoder_router, out.decoder_router
                 c_tok = enc_r.complexity[0].float().cpu().numpy()[: len(enc.ids)]
                 c_frame = dec_r.complexity[0].float().cpu().numpy()
@@ -166,6 +171,7 @@ class ComplexityProbe:
             ["group", "text", "q", "enc_compute", "dec_compute", "flops", "saving"],
             rows, step,
         )
+        scalars["probe/routing_frozen"] = float(routing_frozen)
         logger.log_scalars(scalars, step)
         logger.flush_figures()
         if was_training:

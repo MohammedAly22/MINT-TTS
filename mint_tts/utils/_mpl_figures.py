@@ -19,7 +19,12 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")
+# Force the headless backend ONLY when a notebook backend is not already
+# active. Calling matplotlib.use("Agg") unconditionally kills inline display
+# in Jupyter/Colab: figures are created but nothing is ever shown.
+_ACTIVE = matplotlib.get_backend().lower()
+if not any(k in _ACTIVE for k in ("inline", "nbagg", "widget", "ipympl")):
+    matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -285,6 +290,26 @@ def save_figure(fig, path, png: bool = True, html: bool = False) -> list[Path]:
     target = path.parent / (name + ".png")
     fig.savefig(target, bbox_inches="tight")
     return [target]
+
+
+def show(fig, close: bool = True) -> None:
+    """Display a figure in a notebook, then release it.
+
+    Matplotlib keeps every figure alive until closed, so a loop over a dozen
+    sentences trips the "More than 20 figures have been opened" warning and
+    leaks memory. Closing after display avoids both.
+    """
+    try:
+        from IPython.display import display as _display
+
+        _display(fig)
+    except Exception:
+        try:
+            plt.show()
+        except Exception:
+            pass
+    if close:
+        globals()["close"](fig)
 
 
 def close(fig) -> None:

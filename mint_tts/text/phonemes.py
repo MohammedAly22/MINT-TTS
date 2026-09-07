@@ -22,6 +22,7 @@ to per-word phonemisation for that utterance rather than silently mis-aligning.
 
 from __future__ import annotations
 
+import logging
 import re
 import warnings
 from functools import lru_cache
@@ -69,6 +70,9 @@ class EspeakPhonemizer(PhonemizerBase):
         from phonemizer.separator import Separator
 
         _bind_espeak_library()
+        # phonemizer warns per utterance about the word-count drift we handle
+        # ourselves below; the counter is reported once at the end instead.
+        logging.getLogger("phonemizer").setLevel(logging.ERROR)
         self.language = language
         self._sep = Separator(word="|", syllable="", phone=" ")
         self._backend = EspeakBackend(
@@ -82,6 +86,15 @@ class EspeakPhonemizer(PhonemizerBase):
         chunks = [c.strip() for c in out.split("|")]
         return [c.split() for c in chunks if c.strip()]
 
+    def _phonemize_each(self, words: list[str]) -> list[list[str]]:
+        """One espeak call, one line per word: alignment is guaranteed 1:1."""
+        out = self._backend.phonemize(list(words), separator=self._sep, strip=True)
+        result = []
+        for word, line in zip(words, out):
+            phones = [p for chunk in line.split("|") for p in chunk.split()]
+            result.append(phones or list(word))
+        return result
+
     def phonemize_words(self, words, text=None):
         if not words:
             return []
@@ -89,9 +102,12 @@ class EspeakPhonemizer(PhonemizerBase):
             chunks = self._phonemize_text(text)
             if len(chunks) == len(words):
                 return chunks
+            # espeak occasionally merges a pair of function words, so its
+            # word count drifts from ours. Silently zipping the two would
+            # mis-attribute every phone after the merge and quietly corrupt
+            # the word map the heatmaps are built on.
             self._misaligned += 1
-        # Guaranteed 1:1, at the cost of losing cross-word context.
-        return [self._phonemize_text(w)[0] if self._phonemize_text(w) else list(w) for w in words]
+        return self._phonemize_each(words)
 
 
 class ArpabetPhonemizer(PhonemizerBase):

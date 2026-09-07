@@ -398,7 +398,8 @@ class Trainer:
                                           n=cfg.log.get("n_figure_examples", 2))
                 if self.step % cfg.log.get("probe_every", 1000) == 0:
                     self.probe.run(self.model, self.logger, self.step, self.vocoder,
-                                   hard=cfg.log.get("probe_hard_routing", True))
+                                   hard=cfg.log.get("probe_hard_routing", True),
+                                   routing_frozen=self.routing_frozen)
                 if self.step % cfg.train.get("val_every", 2000) == 0:
                     metrics = self.validate()
                     self.logger.log_scalars(metrics, self.step)

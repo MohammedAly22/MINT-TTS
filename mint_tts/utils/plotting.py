@@ -111,6 +111,19 @@ def close(fig) -> None:
     return _mpl.close(fig)
 
 
+def show(fig, close_after: bool = True) -> None:
+    """Display a figure inline (notebooks) and release it.
+
+    Use this instead of `fig.show()`: on the Agg backend that call is a no-op,
+    which is why figures silently never appeared.
+    """
+    if _is_plotly(fig):
+        fig.show()
+        return None
+    return _mpl.show(fig, close=close_after)
+
+
 __all__ = PLOT_FUNCTIONS + [
-    "set_backend", "backend", "save_figure", "to_image_array", "to_image_arrays", "close",
+    "set_backend", "backend", "save_figure", "to_image_array", "to_image_arrays",
+    "close", "show",
 ]

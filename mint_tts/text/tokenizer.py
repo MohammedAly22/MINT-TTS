@@ -221,6 +221,10 @@ def build_text_processor(cfg, symbols=None) -> TextProcessor:
         keep_punctuation=t.get("keep_punctuation", "!'(),-.:;?\""),
         skip=tuple(t.get("skip_normalisation_steps", [])),
     )
+    # A table loaded from disk IS the model's vocabulary. Growing it would
+    # produce ids beyond the embedding table, so growth is only ever allowed
+    # while preprocessing is still building the table from scratch.
+    allow_growth = symbols is None and t.get("allow_vocab_growth", True)
     return TextProcessor(
         input_type=t.get("input_type", "ipa"),
         phonemizer_kwargs=kwargs,
@@ -229,5 +233,5 @@ def build_text_processor(cfg, symbols=None) -> TextProcessor:
         add_word_boundary=t.get("add_word_boundary", True),
         add_punctuation=t.get("add_punctuation", True),
         symbols=symbols,
-        allow_growth=t.get("allow_vocab_growth", True),
+        allow_growth=allow_growth,
     )

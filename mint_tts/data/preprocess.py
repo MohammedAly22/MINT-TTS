@@ -252,5 +252,7 @@ def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "tra
         (Path(out_dir) / f"{split_name}_errors.json").write_text(
             json.dumps(errors, indent=2), encoding="utf-8"
         )
+    misaligned = getattr(_text_processor(tp_spec).phonemizer, "_misaligned", 0)
     return {"n_ok": len(rows), "n_error": len(errors), "index": str(out_index),
-            "vocab_size": len(table), "unknown_symbols": unknown, "stats": stats}
+            "vocab_size": len(table), "unknown_symbols": unknown,
+            "phonemizer_realigned": int(misaligned), "stats": stats}
