@@ -106,6 +106,21 @@ A constant value across every probe sentence *and* every quality budget means
 the router has collapsed to a constant policy — the degenerate solution, not a
 result.
 
+### 4b. Did the compute change the pronunciation?
+
+`probe/contrast` says compute *went* to the ambiguous word. It does not say the
+word came out different. The homograph probe closes that gap: it synthesises
+both contexts of a minimal pair and compares the mel frames of the ambiguous
+word, against a control of ordinary words present in both sentences.
+
+| Scalar | Good | Bad |
+|---|---|---|
+| `homograph/divergence_ratio` | > 1: ambiguous words vary more across contexts than ordinary words | ~1: rendered identically both times |
+| `homograph/compute_advantage` | > 0 | ~0 |
+
+Differing is necessary, not sufficient -- it can differ *wrongly*. Both
+renditions are logged as `homograph/<word>/audio_a` and `audio_b`; listen.
+
 ### 5. Audio
 
 Three tags per example, and the difference between them matters:

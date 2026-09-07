@@ -1,0 +1,35 @@
+# THE experiment: character input + token-adaptive encoder.
+#
+# The earlier IPA run produced a null result for a specific and avoidable
+# reason: espeak had already committed to one pronunciation before the model
+# saw anything, so there was no ambiguity left to spend compute on. The
+# measured consequence was c_star_encoder == 1/8 for >=80% of utterances --
+# one encoder step was as good as eight, so there was nothing to allocate.
+#
+# With character input the model must perform grapheme-to-phoneme itself, so
+# "record" really is ambiguous at the input and extra depth can pay for
+# itself. This is the configuration in which the hypothesis is testable.
+_base_: [base.yaml, dataset_ljspeech.yaml]
+
+text:
+  input_type: char
+
+data:
+  preprocessed_dir: data/preprocessed/ljspeech_char
+  train_index: data/preprocessed/ljspeech_char/train.jsonl
+  val_index: data/preprocessed/ljspeech_char/val.jsonl
+  test_index: data/preprocessed/ljspeech_char/test.jsonl
+
+model:
+  encoder: { routing: token, share_weights: true }
+  decoder: { routing: fixed, share_weights: true }
+
+vocoder:
+  name: hifigan
+  checkpoint: pretrained/hifigan/generator_v1
+  config: pretrained/hifigan/config.json
+  require_checkpoint: false      # falls back to Griffin-Lim if not downloaded
+
+log:
+  run_name: experiment_char
+  wandb_tags: [adaptive, token, char, homograph]

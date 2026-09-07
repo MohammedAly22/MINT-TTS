@@ -127,6 +127,30 @@ class HiFiGANGenerator(nn.Module):
         remove_weight_norm(self.conv_post)
 
 
+def normalise_generator_state(state: dict) -> dict:
+    """Map third-party HiFi-GAN key layouts onto this generator.
+
+    Two conventions are common in released checkpoints:
+
+        jik876       conv_pre.weight_g
+        SpeechBrain  conv_pre.conv.weight_g   (every conv wrapped in a module)
+
+    Accepting both means a checkpoint can be pointed at directly, without a
+    conversion step that silently produces a randomly-initialised vocoder.
+    """
+    for key in ("generator", "model", "state_dict"):
+        if isinstance(state, dict) and key in state and isinstance(state[key], dict):
+            state = state[key]
+    out = {}
+    for k, v in state.items():
+        for prefix in ("module.", "generator.", "model.g.", "hifi_gan."):
+            if k.startswith(prefix):
+                k = k[len(prefix):]
+        k = k.replace(".conv.", ".").replace(".conv_transpose.", ".")
+        out[k] = v
+    return out
+
+
 DEFAULT_HIFIGAN_V1 = {
     "resblock": "1",
     "num_mels": 80,
@@ -198,9 +222,8 @@ class Vocoder(nn.Module):
                 h = dict(DEFAULT_HIFIGAN_V3)
             gen = HiFiGANGenerator(h)
             if ckpt and Path(ckpt).exists():
-                state = torch.load(ckpt, map_location="cpu", weights_only=False)
-                state = state.get("generator", state)
-                gen.load_state_dict(state)
+                raw = torch.load(ckpt, map_location="cpu", weights_only=False)
+                gen.load_state_dict(normalise_generator_state(raw))
                 gen.remove_weight_norm()
                 self.loaded = True
             else:

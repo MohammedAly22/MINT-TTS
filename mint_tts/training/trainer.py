@@ -31,6 +31,7 @@ from ..utils.common import (
 )
 from ..utils.flops import human, parameter_table
 from ..utils.logging_utils import ExperimentLogger
+from .homograph import HomographProbe
 from .monitors import (
     ComplexityProbe,
     alignment_diagnostics,
@@ -131,6 +132,7 @@ class Trainer:
         self.mcd_chance = self._measure_mcd_chance()
         self._check_figure_export()
         self.probe = ComplexityProbe(cfg, self.tp, self.device)
+        self.homograph = HomographProbe(cfg, self.tp, self.device)
         self.asr = ASRScorer(cfg.eval.get("asr_backend", "none"), device="cpu")
         self.mos = MOSPredictor(cfg.eval.get("mos_backend", "proxy"), device="cpu")
 
@@ -406,6 +408,9 @@ class Trainer:
                     self.probe.run(self.model, self.logger, self.step, self.vocoder,
                                    hard=cfg.log.get("probe_hard_routing", True),
                                    routing_frozen=self.routing_frozen)
+                    if cfg.log.get("homograph_probe", True):
+                        self.homograph.run(self.model, self.logger, self.step,
+                                           self.vocoder, self.routing_frozen)
                 if self.step % cfg.train.get("val_every", 2000) == 0:
                     metrics = self.validate()
                     self.logger.log_scalars(metrics, self.step)

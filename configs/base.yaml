@@ -237,6 +237,12 @@ log:
   probe_budgets: [0.2, 0.5, 0.9]
   probe_max_figures: 4
 
+  probe_max_audio: 14        # sentences that get audio logged (cheap; listen to these)
+  homograph_probe: true      # does extra compute actually change the pronunciation?
+  homograph_audio: true
+  homograph_max_audio: 6
+  homograph_quality: 0.9
+
   # Probe sentences: the qualitative evidence for the hypothesis.
   # `ambiguous_words` drives the scalar `probe/contrast` metric.
   test_sentences:
@@ -254,27 +260,55 @@ log:
     - text: "They will desert us in the desert."
       group: homograph
       ambiguous_words: [desert]
-    - text: "The wind was too strong to wind the sail."
-      group: homograph
-      ambiguous_words: [wind]
     - text: "He decided to lead the team into the lead mine."
       group: homograph
       ambiguous_words: [lead]
-    - text: "The bass player caught a large bass."
-      group: homograph
-      ambiguous_words: [bass]
     - text: "Please present the present to the presenter."
       group: homograph
       ambiguous_words: [present]
     - text: "A live broadcast about the animals that live here."
       group: homograph
       ambiguous_words: [live]
+    - text: "They were standing too close to the gate to close it safely."
+      group: homograph
+      ambiguous_words: [close]
+    - text: "Careless mistakes will result in a poor result."
+      group: homograph
+      ambiguous_words: [result]
+
+    # Tongue twisters: hard PHONETICS, easy semantics. If compute tracked
+    # difficulty in general rather than ambiguity specifically, these should
+    # light up too -- which would be a different finding worth knowing about.
+    - text: "She sells seashells by the seashore."
+      group: tongue_twister
+      note: "dense sibilant alternation"
+    - text: "Peter Piper picked a peck of pickled peppers."
+      group: tongue_twister
+      note: "repeated plosive onsets"
+    - text: "How much wood would a woodchuck chuck if a woodchuck could chuck wood?"
+      group: tongue_twister
+    - text: "Six sticky skeletons stacked six thick bricks."
+      group: tongue_twister
+      note: "consonant clusters, near-repetition"
+    - text: "Silly Sally swiftly shooed seven silly sheep."
+      group: tongue_twister
+
+    # Normalisation: the frontend is doing most of the work here, so these
+    # check the text pipeline as much as the acoustic model.
+    - text: "Doctor Smith paid $1,250.75 on March 3rd, 1987."
+      group: normalisation
+      note: "currency, ordinal date, year"
+    - text: "Call +1 (555) 123-4567 or email a.smith@mit.edu before 9:05 a.m."
+      group: normalisation
+      note: "phone number, email, clock time"
+    - text: "The FBI and NASA met at 15 Oak St., Apt. 4B, about a 25% increase."
+      group: normalisation
+      note: "initialism vs acronym, address, percentage"
+
+    # Length control: long but trivial. If this costs as much as the
+    # homographs, compute is tracking LENGTH, not difficulty.
     - text: "I went to the store and I bought some milk and some bread and some eggs."
       group: long_easy
       note: "long but trivial -- length must NOT imply compute"
-    - text: "She sells seashells by the seashore."
-      group: phonetic
-      note: "hard phonetics, easy semantics"
-    - text: "Doctor Smith paid one thousand dollars on March third."
-      group: normalisation
-      note: "checks the text frontend as much as the router"
+    - text: "Every morning my brother drinks warm tea and reads a short story before school."
+      group: long_easy

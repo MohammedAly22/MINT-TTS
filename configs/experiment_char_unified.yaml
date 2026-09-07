@@ -1,0 +1,14 @@
+# Same as experiment_char, but the ACOUSTIC decoder is adaptive too.
+#
+# The encoder is only 12-17% of total FLOPs; the decoder is 71-78%. So
+# encoder-only routing caps the achievable saving at ~15% however well the
+# router works. Run this for the efficiency number, and experiment_char for
+# the linguistic-allocation claim.
+_base_: experiment_char.yaml
+
+model:
+  decoder: { routing: token, share_weights: true }
+
+log:
+  run_name: experiment_char_unified
+  wandb_tags: [adaptive, token, char, unified]

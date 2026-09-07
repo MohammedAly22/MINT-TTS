@@ -23,7 +23,11 @@ $$\text{Text} \;\rightarrow\; \text{Information requirements} \;\rightarrow\; \t
 The learned quantity is $C^{*}(x, q, h)$: the least computation that still
 reaches quality $q$ for utterance $x$ on a device with capability $h$.
 
-Read [`docs/HYPOTHESIS.md`](docs/HYPOTHESIS.md) first — it states the claim and,
+New to speech synthesis? **[`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md)**
+explains the whole system from scratch and defines every term in the logs —
+probe, C\*, MCD, mcd/chance, ponder, depth spread.
+
+Then read [`docs/HYPOTHESIS.md`](docs/HYPOTHESIS.md): it states the claim and,
 just as importantly, what would falsify it.
 
 ---
@@ -366,7 +370,9 @@ Run in order; each is a stop/go decision, not a checklist.
 | `exp0_dense.yaml` | quality ceiling and FLOP reference |
 | `exp0_dense_shallow.yaml` | the cost floor the adaptive model should approach |
 | `exp1_sentence.yaml` | does sentence-level adaptivity pay off at all? |
-| `exp2_token.yaml` | **the headline**: per-token allocation |
+| **`experiment_char.yaml`** | **the live experiment**: character input, so homographs actually reach the model |
+| `experiment_char_unified.yaml` | the same with an adaptive decoder, where 75% of the compute is |
+| `exp2_token.yaml` | per-token allocation on phoneme input |
 | `exp2_token_matched.yaml` | the same, widened to match the baseline's parameter count |
 | `exp3_independent.yaml` | is weight sharing as good as per-step weights? |
 | `exp4_acoustic.yaml` | per-frame allocation in the acoustic decoder |

@@ -12,10 +12,14 @@ once and then treated as frozen infrastructure.
     # or verify a file you downloaded by hand
     python scripts/download_vocoder.py --local ~/Downloads/g_02500000
 
-Known sources for the LJSpeech HiFi-GAN (V1) used by most TTS papers:
-  * official release: https://github.com/jik876/hifi-gan  (LJ_V1 / LJ_FT_T2_V1,
-    hosted on Google Drive -- download manually, then pass --local)
-  * many Hugging Face mirrors host the same `generator_v1` + `config.json` pair.
+Verified source (V1 architecture, LJSpeech, 22.05 kHz / hop 256 -- matches this
+repo's mel settings exactly):
+
+    python scripts/download_vocoder.py --hf-repo speechbrain/tts-hifigan-ljspeech         --hf-file generator.ckpt
+
+Also usable:
+  * official release: https://github.com/jik876/hifi-gan (LJ_V1 / LJ_FT_T2_V1,
+    on Google Drive -- download by hand, then pass --local)
 
 Until a checkpoint is in place the repo falls back to Griffin-Lim, which is
 intelligible but not publication quality: set `vocoder.name=hifigan` in the
@@ -39,6 +43,7 @@ from mint_tts.models.vocoder import (
     DEFAULT_HIFIGAN_V1,
     DEFAULT_HIFIGAN_V3,
     HiFiGANGenerator,
+    normalise_generator_state,
 )
 
 
@@ -51,17 +56,7 @@ def download(url: str, dest: Path) -> Path:
 
 
 def normalise_state_dict(state: dict) -> dict:
-    """Strip common wrapper prefixes so third-party mirrors load cleanly."""
-    for key in ("generator", "model", "state_dict"):
-        if isinstance(state, dict) and key in state and isinstance(state[key], dict):
-            state = state[key]
-    out = {}
-    for k, v in state.items():
-        for prefix in ("module.", "generator.", "model.g.", "hifi_gan."):
-            if k.startswith(prefix):
-                k = k[len(prefix):]
-        out[k] = v
-    return out
+    return normalise_generator_state(state)
 
 
 def main() -> int:
@@ -70,7 +65,7 @@ def main() -> int:
     ap.add_argument("--url", default=None)
     ap.add_argument("--config-url", default=None)
     ap.add_argument("--hf-repo", default=None)
-    ap.add_argument("--hf-file", default="generator_v1")
+    ap.add_argument("--hf-file", default="generator.ckpt")
     ap.add_argument("--hf-config", default="config.json")
     ap.add_argument("--local", default=None)
     ap.add_argument("--variant", choices=["v1", "v3"], default="v1")

@@ -64,6 +64,9 @@ class ComplexityProbe:
         self.budgets = list(cfg.log.get("probe_budgets", [0.2, 0.5, 0.9]))
         self.max_figs = int(cfg.log.get("probe_max_figures", 6))
         self.log_audio = bool(cfg.log.get("probe_audio", True))
+        # Audio is cheap next to figures, so more sentences can be listened to
+        # than are plotted.
+        self.max_audio = int(cfg.log.get("probe_max_audio", 12))
 
     @torch.inference_mode()
     def run(self, model, logger, step: int, vocoder=None, hard: bool = True,
@@ -110,7 +113,15 @@ class ComplexityProbe:
                     for w, val in zip(enc.words, word_c):
                         (amb_vals if w.lower() in amb else other_vals).append(float(val))
 
-                if si < self.max_figs and abs(q - self.budgets[-1]) < 1e-9:
+                last_budget = abs(q - self.budgets[-1]) < 1e-9
+                if vocoder is not None and self.log_audio and last_budget and si < self.max_audio:
+                    try:
+                        logger.log_audio(f"{tag}/audio",
+                                         vocoder.to_wav(out.mel_post[0, :, :n_frames]),
+                                         step, self.cfg.audio.sample_rate)
+                    except Exception:
+                        pass
+                if si < self.max_figs and last_budget:
                     logger.log_figure(
                         f"{tag}/token_complexity",
                         plotting.plot_token_complexity(
@@ -132,12 +143,6 @@ class ComplexityProbe:
                         logger.log_figure(
                             f"{tag}/frame_complexity",
                             plotting.plot_frame_complexity(c_frame), step)
-                    if vocoder is not None and self.log_audio:
-                        try:
-                            wav = vocoder.to_wav(out.mel_post[0, :, :n_frames])
-                            logger.log_audio(f"{tag}/audio", wav, step, self.cfg.audio.sample_rate)
-                        except Exception:
-                            pass
 
                 rows.append([
                     sent.group, sent.text[:60], f"{q:g}", f"{c_tok.mean():.3f}",
