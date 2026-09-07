@@ -53,7 +53,8 @@ def utterance_curve(
     hard: bool = True,
 ) -> dict:
     """Returns {'compute': [...], 'quality': [...], 'metrics': [...]} for one utterance."""
-    curve = {"compute": [], "quality": [], "metrics": []}
+    curve = {"compute": [], "encoder_compute": [], "decoder_compute": [],
+             "quality": [], "metrics": []}
     for frac in points:
         if sweep == "steps":
             kwargs = dict(
@@ -76,6 +77,7 @@ def utterance_curve(
             "decoder_compute": float(out.decoder_router.per_utterance_depth()[0]
                                      / model.decoder.max_steps),
             "flops": float(model.flops(out).total),
+            "flops_saving": float(model.flops(out).saving),
         }
         if vocoder is not None and asr is not None and asr.available:
             wav = vocoder.to_wav(pred.to(device))
@@ -87,8 +89,13 @@ def utterance_curve(
         if "mos" not in metrics:
             metrics["mos"] = MOSPredictor.proxy_from_metrics(metrics["mcd"], metrics.get("cer"))
 
-        curve["compute"].append(float(metrics["encoder_compute"] * 0.5
-                                      + metrics["decoder_compute"] * 0.5))
+        # Fraction of the dense-equivalent FLOPs actually spent. A flat 50/50
+        # average of the two stacks hides the one under study: with a fixed
+        # decoder it pins C* near 0.5 no matter what the encoder does, so the
+        # per-stack numbers are kept alongside it.
+        curve["compute"].append(float(1.0 - metrics["flops_saving"]))
+        curve["encoder_compute"].append(metrics["encoder_compute"])
+        curve["decoder_compute"].append(metrics["decoder_compute"])
         curve["quality"].append(quality_score(metrics))
         curve["metrics"].append(metrics)
     return curve
@@ -104,20 +111,37 @@ def minimum_compute(curve: dict, ratio: float = 0.98) -> dict:
     threshold = ratio * q_max
     ok = np.where(q >= threshold)[0]
     idx = int(ok[0]) if ok.size else int(np.nanargmax(q))
-    return {
+    out = {
         "c_star": float(c[idx]),
         "c_star_index": idx,
         "q_max": q_max,
         "threshold": float(threshold),
         "q_at_c_star": float(q[idx]),
     }
+    for stack in ("encoder", "decoder"):
+        vals = curve.get(f"{stack}_compute")
+        if vals and idx < len(vals):
+            out[f"c_star_{stack}"] = float(vals[idx])
+    return out
 
 
 def summarise(records: list[dict]) -> dict:
     cstars = np.array([r["c_star"] for r in records if np.isfinite(r.get("c_star", np.nan))])
     if cstars.size == 0:
         return {"n": 0}
-    return {
+    extra = {}
+    for stack in ("encoder", "decoder"):
+        v = np.array([r[f"c_star_{stack}"] for r in records if f"c_star_{stack}" in r])
+        if v.size:
+            extra[f"c_star_{stack}_mean"] = float(v.mean())
+            extra[f"c_star_{stack}_std"] = float(v.std())
+            extra[f"c_star_{stack}_unique"] = int(np.unique(np.round(v, 4)).size)
+    # If nearly every utterance shares one C*, there is nothing to allocate --
+    # the premise fails before any router gets a chance.
+    extra["c_star_unique_values"] = int(np.unique(np.round(cstars, 4)).size)
+    extra["c_star_share_at_mode"] = float(
+        (np.round(cstars, 4) == np.round(np.median(cstars), 4)).mean())
+    return {**extra,
         "n": int(cstars.size),
         "c_star_mean": float(cstars.mean()),
         "c_star_std": float(cstars.std()),
