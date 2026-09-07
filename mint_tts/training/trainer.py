@@ -31,7 +31,12 @@ from ..utils.common import (
 )
 from ..utils.flops import human, parameter_table
 from ..utils.logging_utils import ExperimentLogger
-from .monitors import ComplexityProbe, alignment_diagnostics, log_training_examples
+from .monitors import (
+    ComplexityProbe,
+    alignment_diagnostics,
+    log_training_examples,
+    routing_diagnostics,
+)
 
 
 def build_scheduler(optimizer, cfg, total_steps: int):
@@ -265,6 +270,7 @@ class Trainer:
                 self.ema.update(self.model)
 
         logs.update(alignment_diagnostics(out, batch))
+        logs.update(routing_diagnostics(out))
         logs["train/routing_frozen"] = float(self.routing_frozen)
         logs["train/lr"] = self.optimizer.param_groups[0]["lr"]
         logs["train/encoder_depth"] = out.encoder_router.mean_depth().detach()

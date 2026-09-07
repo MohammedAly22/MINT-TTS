@@ -55,6 +55,7 @@ class RouterOutput:
     kv_token_steps: float = 0.0          # positions whose keys/values were projected
     attn_kv_steps: float = 0.0           # sum of query*key pairs actually scored
     hard: bool = False
+    routing_is_fixed: bool = False   # True when every position took every step
     extras: dict = field(default_factory=dict)
 
     @property
@@ -262,6 +263,7 @@ class AdaptiveStack(nn.Module):
             kv_token_steps=float(m.sum()) * n,
             attn_kv_steps=float((m.sum(1) ** 2).sum()) * n,
             hard=False,
+            routing_is_fixed=True,
         )
 
     # -- soft (differentiable) path ---------------------------------------
@@ -378,6 +380,7 @@ class AdaptiveStack(nn.Module):
             kv_token_steps=float(kv_token_steps.detach()),
             attn_kv_steps=float(attn_kv_steps.detach()),
             hard=False,
+            routing_is_fixed=self.routing == "fixed",
         )
 
     # -- hard (gathered) path: real FLOP savings --------------------------

@@ -223,6 +223,45 @@ def alignment_diagnostics(out, batch) -> dict:
     return logs
 
 
+@torch.no_grad()
+def routing_diagnostics(out) -> dict:
+    """Is the router *differentiating*, or just settling on a constant?
+
+    Mean depth cannot answer that: 3.2 could be every token at 3.2, or half at
+    1 and half at 5. Only the spread distinguishes a working allocator from a
+    collapsed one, and collapse is the failure mode this project has already
+    hit once.
+
+    compute/depth_spread   std of executed depth ACROSS TOKENS, averaged over
+                           utterances. ~0 means a constant policy: no
+                           allocation is happening, whatever the mean says.
+    compute/depth_range    mean (max - min) depth within an utterance.
+    compute/frac_at_min    fraction of tokens halting at the earliest step.
+    compute/frac_at_max    fraction running to full depth.
+    """
+    logs: dict = {}
+    for name, router in (("encoder", out.encoder_router), ("decoder", out.decoder_router)):
+        if router.routing_is_fixed:
+            continue
+        n = router.n_updates
+        m = router.mask
+        spreads, ranges = [], []
+        for i in range(n.size(0)):
+            vals = n[i][m[i]]
+            if vals.numel() > 1:
+                spreads.append(float(vals.std()))
+                ranges.append(float(vals.max() - vals.min()))
+        if spreads:
+            logs[f"compute/{name}_depth_spread"] = float(np.mean(spreads))
+            logs[f"compute/{name}_depth_range"] = float(np.mean(ranges))
+        valid = n[m]
+        if valid.numel():
+            steps = router.halting_probs.size(1)
+            logs[f"compute/{name}_frac_at_min"] = float((valid <= 1).float().mean())
+            logs[f"compute/{name}_frac_at_max"] = float((valid >= steps).float().mean())
+    return logs
+
+
 def _safe_corr(x, y) -> float:
     """Pearson r, or nan when a series is constant (instead of a warning)."""
     x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
