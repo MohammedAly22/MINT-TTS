@@ -78,6 +78,11 @@ fixed; the run itself was diagnostic, not wasted.
       (~39 ms/figure vs ~600 ms, nothing external); plotly stays available as
       `log.figure_backend: plotly` for interactive figures in W&B.
 
+- [x] Brand and diagrams generated from source (`scripts/make_diagrams.py`):
+      logo, architecture, pipeline and experiment-ladder SVGs
+- [x] Homograph probe: does the extra compute change the pronunciation?
+- [x] Corpus coverage check: can the data teach a given homograph at all?
+
 ## Phase 1 — test the hypothesis on LJSpeech (24 h, single speaker)
 
 - [ ] **E0** Dense baseline `exp0_dense` trained to convergence

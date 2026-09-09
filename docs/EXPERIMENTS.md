@@ -1,5 +1,9 @@
 # Experiment plan
 
+<div align="center">
+<img src="../assets/experiments.svg" alt="experiment ladder" width="860"/>
+</div>
+
 Run these in order. Each one is a decision point: if it fails, stop and think,
 do not proceed to the next.
 

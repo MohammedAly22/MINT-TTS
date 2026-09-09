@@ -9,6 +9,11 @@ Every term that appears in the logs or the notebook is defined here.
 
 You give it a sentence. It gives you a `.wav`. In between:
 
+<div align="center">
+<img src="../assets/pipeline.svg" alt="text to audio pipeline" width="820"/>
+</div>
+
+
 ```
 "The record is broken."
         |
@@ -40,6 +45,10 @@ intelligible but sounds metallic. The vocoder is *frozen* — identical in every
 experiment — so quality differences between runs are always the model's doing.
 
 ---
+
+<div align="center">
+<img src="../assets/architecture.svg" alt="MINT-TTS architecture" width="1000"/>
+</div>
 
 ## 2. The pieces, in order
 

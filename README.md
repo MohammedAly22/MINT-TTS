@@ -1,8 +1,20 @@
-# MINT-TTS
+<div align="center">
 
-**Minimal Inference Needed for Text-to-Speech**
+<img src="assets/logo.svg" alt="MINTS" width="380"/>
 
-*Speech synthesis reformulated as a resource-allocation problem.*
+### MINT-TTS — Minimal Inference Needed for Text-to-Speech
+
+**Speech synthesis reformulated as a resource-allocation problem.**
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MohammedAly22/MINT-TTS/blob/main/notebooks/colab_quickstart.ipynb)
+[![Tests](https://img.shields.io/badge/tests-99%20passing-2E9B57)](tests/)
+[![Python](https://img.shields.io/badge/python-3.9%2B-8CC63F)](pyproject.toml)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-ee4c2c)](https://pytorch.org)
+[![License](https://img.shields.io/badge/license-MIT-64748b)](LICENSE)
+
+[Quickstart](#quickstart) · [Architecture](#architecture) · [How it works](docs/HOW_IT_WORKS.md) · [The hypothesis](docs/HYPOTHESIS.md) · [Experiments](docs/EXPERIMENTS.md)
+
+</div>
 
 ---
 
@@ -23,12 +35,27 @@ $$\text{Text} \;\rightarrow\; \text{Information requirements} \;\rightarrow\; \t
 The learned quantity is $C^{*}(x, q, h)$: the least computation that still
 reaches quality $q$ for utterance $x$ on a device with capability $h$.
 
-New to speech synthesis? **[`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md)**
-explains the whole system from scratch and defines every term in the logs —
-probe, C\*, MCD, mcd/chance, ponder, depth spread.
+> **Status: an instrument, not a result.** The pipeline is verified end to end
+> and every component does what it says. The hypothesis itself is still open —
+> that is the point of the repository. See [Where this stands](#where-this-stands).
 
-Then read [`docs/HYPOTHESIS.md`](docs/HYPOTHESIS.md): it states the claim and,
-just as importantly, what would falsify it.
+---
+
+## Resources
+
+| | | |
+|---|---|---|
+| **Colab notebook** | run the full experiment on a free GPU | [![Open](https://img.shields.io/badge/open-notebook-F9AB00)](https://colab.research.google.com/github/MohammedAly22/MINT-TTS/blob/main/notebooks/colab_quickstart.ipynb) |
+| **How it works** | every term explained from scratch | [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) |
+| **Hypothesis** | the claim, and what would falsify it | [docs/HYPOTHESIS.md](docs/HYPOTHESIS.md) |
+| **Model weights** | pretrained checkpoints | `planned` — Hugging Face |
+| **Interactive demo** | type a sentence, hear it, see the heatmap | `planned` — Hugging Face Space |
+| **Audio samples** | side-by-side homograph renditions | `planned` |
+| **Paper** | the write-up | `planned` |
+| **PyPI** | `pip install mint-tts` | `planned` |
+
+Items marked `planned` do not exist yet and are listed so the structure is
+visible — no dead links are provided for them.
 
 ---
 
@@ -38,14 +65,11 @@ just as importantly, what would falsify it.
 git clone https://github.com/MohammedAly22/MINT-TTS.git && cd MINT-TTS
 pip install -r requirements.txt
 
-# see how each text frontend handles homographs (no data or model needed)
-python scripts/inspect_frontend.py
-
-# run the test suite
-python -m pytest -q
+python scripts/inspect_frontend.py    # how each text frontend handles homographs
+python -m pytest -q                   # 99 tests, ~20 s
 ```
 
-Then train on LJSpeech:
+Train on LJSpeech:
 
 ```bash
 # 1. data (2.6 GB)
@@ -53,68 +77,31 @@ curl -L -o ljs.tar.bz2 https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz
 tar -xjf ljs.tar.bz2 -C data/
 python scripts/prepare_dataset.py --dataset ljspeech --root data/LJSpeech-1.1
 
-# 2. features + cached phonemisation (~10 min with 4 workers)
-python scripts/preprocess.py --config configs/exp2_token.yaml --workers 4
+# 2. a real vocoder, so you can judge by ear
+python scripts/download_vocoder.py \
+    --hf-repo speechbrain/tts-hifigan-ljspeech --hf-file generator.ckpt
 
-# 3. the headline experiment
-python scripts/train.py --config configs/exp2_token.yaml
+# 3. features + cached tokenisation (~2-3 min, 4 workers)
+python scripts/preprocess.py --config configs/experiment_char.yaml --workers 4
 
-# 4. watch it think
+# 4. the experiment
+python scripts/train.py --config configs/experiment_char.yaml
+
+# 5. watch it think
 tensorboard --logdir runs
 ```
 
-Colab: [`notebooks/colab_quickstart.ipynb`](notebooks/colab_quickstart.ipynb)
-runs all of the above, TensorBoard included, on a free GPU.
+---
+
+## From text to audio
+
+<div align="center"><img src="assets/pipeline.svg" alt="text to audio pipeline" width="820"/></div>
 
 ---
 
 ## Architecture
 
-```
-                            TEXT
-                              |
-              +---------------v----------------+
-              |  Normaliser                    |  numbers, currency, dates,
-              |  num2words + rule pipeline     |  emails, URLs, phones,
-              +---------------+----------------+  addresses, acronyms
-                              |
-              +---------------v----------------+
-              |  Frontend  char | ipa | arpabet|  espeak-ng or g2p_en
-              +---------------+----------------+
-                              |  tokens + word map
-              +---------------v----------------+
-              |  Embedding + Conv prenet       |  local mixing (dense)
-              +---------------+----------------+
-                              |
-        ======================v=========================
-        |  LINGUISTIC STACK - adaptive depth per TOKEN  |
-        |                                               |
-        |      +--------------+     router sees         |
-        |   -->| shared block |--->  (state, q, h)      |
-        |   |  +------+-------+          |              |
-        |   |         |          halt?   |              |
-        |   +---------+<-------- no -----+              |
-        ======================+=========================
-                              |  c1 c2 ... cT  <- complexity heatmap
-              +---------------v----------------+
-              |  Aligner (train) -> durations  |  forward-sum + MAS
-              |  Duration / pitch / energy     |
-              +---------------+----------------+
-                              |
-                      length regulator
-                              |
-        ======================v=========================
-        |  ACOUSTIC STACK - adaptive depth per FRAME    |
-        ======================+=========================
-                              |
-                    Linear + Conv postnet
-                              |
-                      MEL SPECTROGRAM
-                              |
-                  FIXED HiFi-GAN vocoder
-                              |
-                            AUDIO
-```
+<div align="center"><img src="assets/architecture.svg" alt="MINT-TTS architecture" width="1000"/></div>
 
 ### What makes it adaptive
 
@@ -126,14 +113,13 @@ Both stacks are the same class, `AdaptiveStack`, with three routing modes:
 | `sentence` | one decision per utterance | Experiment 1 |
 | `token` | one decision per token/frame (ACT) | Experiments 2–5 |
 
-Because the baseline and the adaptive model are **the same code with a
-different flag**, the comparison is a controlled experiment rather than two
-codebases that happen to be benchmarked together.
+The baseline and the adaptive model are **the same code with a different flag**,
+so the comparison is a controlled experiment rather than two codebases that
+happen to be benchmarked together.
 
-Halting follows Adaptive Computation Time. At step $n$ the router emits a
-halting probability per position; the output is the convex combination of
-intermediate states weighted by the halting distribution. Two numbers come out,
-and they are not the same:
+Halting follows Adaptive Computation Time. At each pass the router emits a
+halting probability per position; the output is a weighted combination of the
+intermediate states. Two numbers come out, and they are not the same:
 
 $$\text{ponder}_t = n^{\text{updates}}_t + r_t \qquad\qquad c_t = \frac{n^{\text{updates}}_t}{N}$$
 
@@ -147,41 +133,42 @@ The router does not ask *"which expert owns this token?"* (MoE). It asks
 enough?"* With `share_weights: true` one block is re-applied, so extra depth
 costs **no extra parameters** — depth becomes a pure inference-time knob.
 
+Each pass is one round of information exchange across the sentence, so a token
+needs enough passes for the disambiguating evidence to reach it. "the" needs
+none.
+
 ### The budget is an input
 
-The router additionally receives $(q, h)$ through a small MLP producing a
-halting-logit bias and FiLM parameters. Both heads are zero-initialised, so an
-untrained model behaves like plain ACT and the conditioning is *learned*, not
-imposed. During training $q \sim U[0,1]$, $h \sim U[0.3,1]$ and the compute
-penalty is scaled by $(1-q)$ — so one checkpoint spans the whole quality/compute
-curve instead of a single operating point.
+The router receives $(q, h)$ through a small MLP producing a halting-logit bias
+and FiLM parameters. Both heads are zero-initialised, so an untrained model
+behaves like plain ACT and the conditioning is *learned*, not imposed. During
+training $q \sim U[0,1]$, $h \sim U[0.3,1]$ and the compute penalty is scaled by
+$(1-q)$ — one checkpoint spans the whole trade-off curve.
 
 ```python
 syn("The record is broken by the record broker.", quality=0.3)   # cheap
 syn("The record is broken by the record broker.", quality=0.95)  # careful
 ```
 
-### Where the savings actually come from
+### Where the savings come from
 
-Training uses a dense masked path (no speedup — that is fine, the claim is
-about inference). Inference uses `forward_active`: at each step only the
-still-running positions are gathered and pushed through the block, while halted
-positions keep frozen keys/values in a cache so attention still sees the whole
-sequence.
+Training uses a dense masked path (no speedup — the claim is about inference).
+Inference gathers only the still-running positions, while halted positions keep
+frozen keys/values in a cache so attention still sees the whole sequence.
 
 `tests/test_adaptive.py` asserts the two paths are **numerically identical**
-(~1e-6). If they ever drift, every inference-time measurement would be of a
-different model than the one that was trained.
+(~1e-6). If they ever drift, every inference measurement would be of a different
+model than the one that was trained.
 
-Two subtleties that are easy to get wrong and are handled explicitly:
+Two subtleties handled explicitly:
 
 * **The final step forces a halt.** Otherwise a position that never crosses the
   threshold has `ponder == N` exactly — a constant, with zero gradient — and no
-  compute penalty could ever move it.
+  compute penalty could move it.
 * **Shared weights make halting free; independent weights do not.** A cached key
   is only valid if every step uses the same projection. With per-step weights,
-  keys must be re-projected for all readable positions, which the FLOP counter
-  tracks separately as `kv_token_steps`.
+  keys must be re-projected for all readable positions, tracked separately as
+  `kv_token_steps`.
 
 Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -195,11 +182,10 @@ model has to learn**:
 | `text.input_type` | Backend | Homographs |
 |---|---|---|
 | `char` | none | untouched — the model gets the ambiguity intact |
-| `ipa` | espeak-ng (`phonemizer` + `espeakng-loader`, no system install) | resolved by espeak's own rules, which are largely context-free |
-| `arpabet` | `g2p_en` (CMUdict + POS tagger + homograph list) | *attempts* contextual disambiguation |
+| `ipa` | espeak-ng (`phonemizer` + `espeakng-loader`, no system install) | resolved by espeak's own, largely context-free rules |
+| `arpabet` | `g2p_en` (CMUdict + POS tagger) | *attempts* contextual disambiguation |
 
-`python scripts/inspect_frontend.py` measures this on ten minimal pairs. The
-result is worth knowing before you choose:
+`python scripts/inspect_frontend.py` measures this on ten minimal pairs:
 
 ```
 'read'   A: I read a book yesterday.      B: I will read a book tomorrow.
@@ -211,24 +197,20 @@ result is worth knowing before you choose:
  arpabet [same   ]  A=L EH1 D          B=L EH1 D      <- wrong for the verb
 ```
 
-**Neither phonemiser is an oracle.** espeak is context-free on most of these
-pairs; g2p_en varies more often but sometimes in the wrong direction. So the
-recommendation is not "use espeak" or "use g2p_en" — it is:
+**Neither phonemiser is an oracle.** So the recommendation is not "use espeak"
+or "use g2p_en" — it is to treat the frontend as an **experimental variable**.
+`configs/frontend_{char,ipa,arpabet}.yaml` are identical except for the input
+representation.
 
-> Treat the frontend as an **experimental variable**, not a settled choice.
-
-Three ready-made configs do exactly that, identical except for the input
-representation: `configs/frontend_char.yaml`, `frontend_ipa.yaml`,
-`frontend_arpabet.yaml`. The default is `ipa` — phonetic enough to train well,
-context-free enough that the ambiguity survives for the model to spend compute
-on. If `probe/contrast` rises under `char`/`ipa` but not under `arpabet`, that
-is direct evidence the router is doing disambiguation work rather than
-inheriting it from the frontend.
+This matters more than it looks. Training on `ipa` gave a **null result** for a
+specific reason: espeak had already chosen a pronunciation, so no ambiguity ever
+reached the model, and one encoder step was as good as eight. `char` is the
+setting in which the hypothesis is testable at all.
 
 ### Normalisation
 
-An ordered rule pipeline built on `num2words`. Order matters — currency before
-bare numbers, dates before ordinals, phone numbers before digit groups:
+An ordered rule pipeline over `num2words` — currency before bare numbers, dates
+before ordinals, phone numbers before digit groups:
 
 ```
 "Dr. Smith paid $1,250.75 on 3/15/2024."
@@ -243,37 +225,33 @@ bare numbers, dates before ordinals, phone numbers before digit groups:
   -> "fifteen oak street, apartment four bee; take oak drive north."
 ```
 
-Covers numbers, ordinals, years, currency, percentages, temperatures, units,
-dates, times, phone numbers, emails, URLs, street addresses, unit designators,
-titles, general abbreviations and acronyms (`FBI` spelled out, `NASA` kept as a
-word). `TextNormalizer(...).trace(text)` shows the output after every step when
-a rule misfires.
+`TextNormalizer(...).trace(text)` shows the output after every step when a rule
+misfires.
 
 ---
 
 ## Monitoring
 
-Every `log.probe_every` steps the trainer runs a fixed probe set and logs:
+<div align="center"><img src="assets/experiments.svg" alt="experiment ladder" width="820"/></div>
+
+Every `log.probe_every` steps the trainer resynthesises a fixed probe set —
+homographs, tongue twisters, normalisation cases, and long-but-easy controls —
+and logs heatmaps, audio and these scalars:
 
 | Panel | What it tells you |
 |---|---|
-| `probe/*/token_complexity` | per-token compute heatmap, labelled with the real tokens |
-| `probe/*/word_complexity` | aggregated per word — where `record` vs `the` shows up |
-| `probe/*/halting` | halting probability at every step (steps × tokens) |
-| `probe/*/frame_complexity` | per-frame acoustic compute |
-| `probe/compute_by_group` | easy vs homograph vs long-easy, side by side |
-| **`probe/contrast`** | one number: compute on ambiguous words minus the rest |
-| **`probe/length_corr`** | correlation of compute with length — near 1.0 means the model cheated |
-| `train/*/alignment_soft`, `alignment_hard` | aligner health; check this first when a run misbehaves |
 | `align/entropy_ratio` | **check first**: ~1.0 means the aligner is at chance and nothing downstream is meaningful |
-| `val/mcd_vs_chance` | ≥ 1.0 means the output carries no utterance-specific information |
-| `val/wer`, `val/cer`, `val/quality_score` | quality |
-| `compute/*`, `train/flops_saving` | what the compute penalty is doing |
+| `val/mcd_vs_chance` | ≥ 1.0 means the audio carries no information about *which* sentence was asked for |
+| `compute/*_depth_spread` | ~0 means the router collapsed to a constant — no allocation, whatever the mean says |
+| `probe/contrast` | compute on ambiguous words minus the rest. The claim, as one number |
+| `probe/length_corr` | near 1.0 means the router only learned sentence length |
+| `homograph/divergence_ratio` | > 1 means ambiguous words are *rendered differently* across contexts |
+| `probe/*/token_complexity` | per-token compute heatmap, labelled with the real tokens |
+| `train/*/alignment_hard` | aligner health; check this first when a run misbehaves |
 
-Figures render with matplotlib by default — straight into TensorBoard, no
-external binary. Set `log.figure_backend: plotly` for interactive versions
-(hovering a cell reads `token='r' word='record' depth=6.0/8`), which is ideal
-with W&B; its TensorBoard path additionally needs kaleido and a Chrome install.
+Figures render with matplotlib straight into TensorBoard — no external binary.
+Set `log.figure_backend: plotly` for interactive versions (hovering a cell reads
+`token='r' word='record' depth=6.0/8`), ideal with W&B.
 
 Details: [`docs/MONITORING.md`](docs/MONITORING.md).
 
@@ -294,16 +272,17 @@ python scripts/preprocess.py --config configs/vctk_token.yaml --workers 4
 python scripts/train.py      --config configs/vctk_token.yaml
 ```
 
-Multi-speaker is wired end to end: `model.n_speakers: auto` reads the real
-count from the preprocessed corpus, so it cannot silently disagree with the
-data. `--speaker-disjoint` switches to held-out speakers when you want the
-zero-shot question instead.
+Multi-speaker is wired end to end: `model.n_speakers: auto` reads the real count
+from the preprocessed corpus, so the config cannot silently disagree with the
+data. Your own corpus works through pipe filelists, CSV (with emotion labels),
+or JSONL — see [`docs/DATA_FORMAT.md`](docs/DATA_FORMAT.md). Only audio and a
+transcript are required.
 
-Your own corpus works through any of four manifest formats (pipe filelist, CSV
-with emotion labels, JSONL, or the templates in [`filelists/`](filelists/)) —
-see [`docs/DATA_FORMAT.md`](docs/DATA_FORMAT.md). Only audio and a transcript
-are required: durations are learned by the internal aligner, and the *compute*
-labels are generated later by `scripts/compute_curve.py`, not annotated by hand.
+Before blaming the model for a homograph error, check the corpus can teach it:
+
+```bash
+python scripts/homograph_coverage.py --filelist filelists/ljspeech_train.txt
+```
 
 ---
 
@@ -312,7 +291,7 @@ labels are generated later by `scripts/compute_curve.py`, not annotated by hand.
 ```python
 from mint_tts.inference.synthesize import Synthesizer
 
-syn = Synthesizer.from_checkpoint("runs/exp2_token/checkpoints/best.pt")
+syn = Synthesizer.from_checkpoint("runs/experiment_char/checkpoints/best.pt")
 res = syn("The record is broken by the record broker.", quality=0.9)
 res.save("out.wav")
 
@@ -322,7 +301,7 @@ for word, c in zip(res.encoded.words, res.word_complexity):
 ```
 
 ```bash
-python scripts/synthesize.py --checkpoint runs/exp2_token/checkpoints/best.pt \
+python scripts/synthesize.py --checkpoint runs/experiment_char/checkpoints/best.pt \
     --text "I read a book yesterday." --quality 0.9
 
 # the same sentence across the whole budget: C*(x, q)
@@ -350,58 +329,66 @@ mint_tts/
 ├── losses/              reconstruction losses + the compute-allocation objective
 ├── evaluation/          MCD, WER/CER, MOS, per-utterance compute curves
 ├── benchmarks/          latency / RTF / FLOPs / memory measurement
-├── training/            trainer, complexity probe, figure logging
+├── training/            trainer, complexity probe, homograph probe
 └── inference/           Synthesizer API
 configs/                 base.yaml + one file per experiment and dataset
 scripts/                 prepare, preprocess, train, synthesize, benchmark,
-                         evaluate, compute_curve, inspect_frontend
-docs/                    hypothesis, architecture, data format, experiments, monitoring
-tests/                   72 tests, ~6 s
+                         evaluate, compute_curve, inspect_frontend,
+                         homograph_coverage, download_vocoder, make_diagrams
+docs/                    how it works, hypothesis, architecture, data, experiments
+tests/                   99 tests, ~20 s
 ```
 
 ---
 
 ## Experiments
 
-Run in order; each is a stop/go decision, not a checklist.
-
 | Config | Question |
 |---|---|
-| `exp0_dense.yaml` | quality ceiling and FLOP reference |
-| `exp0_dense_shallow.yaml` | the cost floor the adaptive model should approach |
-| `exp1_sentence.yaml` | does sentence-level adaptivity pay off at all? |
-| **`experiment_char.yaml`** | **the live experiment**: character input, so homographs actually reach the model |
+| **`experiment_char.yaml`** | **the live experiment**: character input, so homographs reach the model |
 | `experiment_char_unified.yaml` | the same with an adaptive decoder, where 75% of the compute is |
+| `exp0_dense.yaml` / `exp0_dense_shallow.yaml` | quality ceiling and cost floor |
+| `exp1_sentence.yaml` | does sentence-level adaptivity pay off at all? |
 | `exp2_token.yaml` | per-token allocation on phoneme input |
-| `exp2_token_matched.yaml` | the same, widened to match the baseline's parameter count |
 | `exp3_independent.yaml` | is weight sharing as good as per-step weights? |
 | `exp4_acoustic.yaml` | per-frame allocation in the acoustic decoder |
 | `exp5_unified.yaml` | both, with a hardware budget: full $C^{*}(x,q,h)$ |
-| `frontend_{char,ipa,arpabet}.yaml` | does the frontend do the disambiguation, or the model? |
+| `frontend_{char,ipa,arpabet}.yaml` | does the frontend disambiguate, or the model? |
 | `vctk_token.yaml` / `libritts_token.yaml` | does the policy transfer across speakers and scale? |
-| `scale_dense_115m.yaml` / `scale_token_113m.yaml` | does the saving hold at ~115M parameters? |
 
 Decision rules and tuning notes: [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
 
 ---
 
-## Honest notes
+## Where this stands
 
-* **The vocoder is frozen and shared** by every experiment; otherwise a quality
-  delta could come from the vocoder rather than the acoustic model. Griffin-Lim
-  is the default so the repo runs with zero downloads — it is intelligible but
-  not publication quality. Fetch HiFi-GAN with `scripts/download_vocoder.py`
-  and set `vocoder.name: hifigan` before reporting anything.
-* **`mos_proxy` is not MOS.** It is a transparent function of MCD and CER,
-  useful for ranking checkpoints. Use `eval.mos_backend: utmos` for a real MOS
-  predictor, and human listeners for the final claim.
+**Working and verified.** Alignment converges cleanly (`entropy_ratio` 0.47 →
+0.06). Audio is intelligible, with `val/mcd_vs_chance` ≈ 0.27 — well clear of
+the no-information level. Inference runs at RTF 0.05–0.09 on CPU and 0.005–0.01
+on a T4. Training and inference paths are numerically identical.
+
+**Measured, and honest about it.** On phoneme input the encoder showed *no*
+headroom: one step was as good as eight, for ≥80% of utterances — because
+espeak had already resolved the ambiguity. On character input that changed
+(`c_star_encoder_unique` 1 → 6, uncorrelated with length), which is the first
+evidence that different utterances genuinely need different compute.
+
+**Still open.** Whether the router allocates by *linguistic difficulty* rather
+than by something incidental. Early character-input runs learn one pronunciation
+per spelling — likely a corpus limit rather than an architectural one, which is
+what `homograph_coverage.py` exists to settle.
+
+### Honest notes
+
+* **The vocoder is frozen and shared** by every experiment, so a quality delta
+  can never come from the vocoder. Griffin-Lim is the zero-download default and
+  sounds rough; fetch HiFi-GAN before judging anything by ear.
+* **`mos_proxy` is not MOS.** It is a transparent function of MCD and CER.
 * **FLOPs are not speed.** `scripts/benchmark.py` reports latency, RTF, peak
-  memory *and* FLOPs, because a saving that does not show up in wall-clock on a
-  CPU or a GTX 1660 Ti is not a result.
+  memory *and* FLOPs.
 * **Adaptive gains are inference-only.** Training still pays full dense cost.
-* **No quality results are claimed yet.** What has been verified is that the
-  pipeline runs end to end and that each piece does what it says. The
-  hypothesis itself is open — that is the point of the repository.
+* **The encoder is 12–17% of total FLOPs; the decoder is 71–78%.** Encoder-only
+  routing caps the achievable saving at ~15% however well the router works.
 
 Status and next steps: [`ROADMAP.md`](ROADMAP.md).
 
@@ -414,6 +401,17 @@ CPU-only works for inference and benchmarking. espeak-ng arrives through pip
 (`espeakng-loader`) — no system package needed, which is what makes the IPA
 frontend work on a bare Colab runtime.
 
+## Citation
+
+```bibtex
+@software{mint_tts,
+  title  = {MINT-TTS: Minimal Inference Needed for Text-to-Speech},
+  author = {Aly, Mohammed},
+  year   = {2026},
+  url    = {https://github.com/MohammedAly22/MINT-TTS}
+}
+```
+
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).

@@ -1,5 +1,12 @@
 # Architecture
 
+<div align="center">
+<img src="../assets/architecture.svg" alt="MINT-TTS architecture" width="1000"/>
+</div>
+
+The ASCII sketch the diagram replaces is kept below for terminals.
+
+
 ```
                        TEXT
                          |
