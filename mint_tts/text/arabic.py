@@ -13,7 +13,7 @@ What this module provides
 ``ArabicNormalizer``      an ordered pipeline mirroring ``TextNormalizer`` but
                           for Arabic orthography: Arabic-Indic digits, tatweel,
                           Quranic marks, optional letter folding, and number
-                          verbalisation through ``num2words(lang='ar')``.
+                          verbalisation in Egyptian Arabic (see numbers_ar.py).
 ``ArabicCharPhonemizer``  identity frontend over Arabic graphemes. Every
                           ambiguity survives into the model, which is the only
                           setting in which the hypothesis is testable.
@@ -44,23 +44,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
-try:
-    from num2words import num2words as _n2w
-
-    def _ar_number(value) -> str:
-        return _n2w(value, lang="ar")
-
-    HAVE_NUM2WORDS = True
-except Exception:  # pragma: no cover - optional dependency
-    HAVE_NUM2WORDS = False
-    _AR_ONES = ["صفر", "واحد",
-                "اتنين", "تلاتة",
-                "اربعة", "خمسة",
-                "ستة", "سبعة",
-                "تمانية", "تسعة"]
-
-    def _ar_number(value) -> str:
-        return " ".join(_AR_ONES[int(d)] for d in str(abs(int(value))) if d.isdigit())
+from .numbers_ar import decimal_to_words, digits_to_words, number_to_words
 
 
 # --------------------------------------------------------------------------
@@ -168,18 +152,26 @@ def normalise_ta_marbuta(text: str) -> str:
 
 
 def expand_numbers(text: str) -> str:
-    """Verbalise digit runs with the Arabic backend of num2words."""
+    """Verbalise digit runs in EGYPTIAN Arabic.
+
+    Deliberately not ``num2words(lang="ar")``, which emits Modern Standard
+    Arabic in the nominative case: it writes `3ishruun` where every speaker
+    in this corpus says `3ishriin`, `ithnaan` for `itnein`, `mi'a` for
+    `miyya`. The transcript is what the aligner maps onto the audio, so an
+    MSA spelling of a number is a text/audio mismatch the model would be
+    trained on. See text/numbers_ar.py.
+    """
     def repl(m: re.Match) -> str:
         raw = m.group(0)
         try:
             if "." in raw:
-                whole, frac = raw.split(".", 1)
-                frac_words = " ".join(_ar_number(int(d)) for d in frac)
-                # "faasla" = decimal point
-                return f" {_ar_number(int(whole or 0))} فاصلة {frac_words} "
-            return f" {_ar_number(int(raw))} "
+                return f" {decimal_to_words(raw)} "
+            return f" {number_to_words(int(raw))} "
         except Exception:
-            return " " + " ".join(_ar_number(int(d)) for d in raw if d.isdigit()) + " "
+            # An unparseable run (absurdly long, say) is read digit by digit
+            # rather than dropped, so nothing silently vanishes from the
+            # transcript.
+            return " " + digits_to_words(raw) + " "
     return _NUM_RE.sub(repl, text)
 
 

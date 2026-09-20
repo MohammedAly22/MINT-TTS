@@ -134,6 +134,7 @@ class Trainer:
         self.semantic_provider = self._build_semantic_provider()
         self.probe = ComplexityProbe(cfg, self.tp, self.device, self.semantic_provider)
         self.homograph = HomographProbe(cfg, self.tp, self.device, self.semantic_provider)
+        self._report_ambiguity_source()
         self.asr = ASRScorer(cfg.eval.get("asr_backend", "none"), device="cpu")
         self.mos = MOSPredictor(cfg.eval.get("mos_backend", "proxy"), device="cpu")
 
@@ -148,6 +149,41 @@ class Trainer:
             self.log.info(f"Resumed from {resume} at step {self.step}")
 
         self._log_model_summary()
+
+    def _report_ambiguity_source(self) -> None:
+        """Say where the difficulty signal and the probes came from.
+
+        Both are supposed to be *measured*, so a run using the weaker
+        bootstrap -- or no probes at all -- should say so at step 0 rather
+        than leave it to be inferred from flat curves later.
+        """
+        amb_file = self.cfg.loss.compute.get("ambiguity_file", "ambiguity.json")
+        amb_path = Path(self.cfg.data.preprocessed_dir) / amb_file
+        ds = self.train_loader.dataset
+        if getattr(ds, "ambiguity", None) is not None:
+            n = len(ds.ambiguity)
+            top = ", ".join(w for w, _ in ds.ambiguity.top(8))
+            self.log.info(f"Difficulty: MINED from the corpus ({n} word types, {amb_path.name})")
+            self.log.info(f"  most ambiguous discovered: {top}")
+        elif getattr(ds, "use_difficulty", False):
+            self.log.warning(
+                "Difficulty: using the STRUCTURAL prior only (unwritten-vowel "
+                "clitics). No %s found. Run scripts/mine_ambiguity.py to "
+                "measure ambiguity from the corpus -- the structural prior is "
+                "a bootstrap, not the real signal.", amb_path,
+            )
+        if not self.probe.sentences:
+            self.log.warning(
+                "Probe set is EMPTY: probe sentences are mined from the corpus "
+                "and %s does not exist yet, so probe/* metrics will be absent. "
+                "Run scripts/mine_ambiguity.py.", amb_path,
+            )
+        if not self.homograph.pairs:
+            self.log.warning(
+                "Homograph probe has no pairs (mined from %s). "
+                "homograph/* metrics will be absent until mining has run.",
+                amb_path,
+            )
 
     def _build_semantic_provider(self):
         """A callable Encoded -> (semantic (1,W,H), word_index (1,T)).

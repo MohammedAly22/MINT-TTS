@@ -146,43 +146,119 @@ subwords. They are mean-pooled back to whole words using the fast tokenizer's
 poison the signal invisibly, so the encoder asserts the counts agree and falls
 back to per-word encoding when they do not.
 
-### 3. Difficulty-aware compute
+### 3. Difficulty-aware compute, over *measured* ambiguity
 
-`mint_tts/text/homographs_ar.py` scores each word:
+**There is no homograph word list in this repository.** An earlier draft had
+one -- 47 hand-written Egyptian entries -- and it was the wrong design:
 
-| score | meaning |
+* **It does not scale.** 47 entries against 62k word forms covers almost
+  nothing, and every word outside the list is treated as unambiguous.
+* **It encodes assumptions, not data.** The list marked `مصر` ambiguous
+  (Egypt / "he insisted"). In a corpus of history and popular-science
+  programmes it is Egypt essentially every time, so flagging it spends
+  computation on a word that never needed it.
+* **It does not transfer.** Another dialect or language would mean writing
+  another list by hand -- exactly the manual supervision the rest of this
+  repository avoids, since durations are learned by the aligner and compute
+  labels are generated rather than annotated.
+
+So ambiguity is **discovered from the corpus** (`mint_tts/text/ambiguity.py`,
+run by `scripts/mine_ambiguity.py`).
+
+#### The measurement
+
+A homograph is a spelling whose *pronunciation varies with context*. Both
+halves are observable:
+
+| half | where it comes from |
 |---|---|
-| 0.0 | ordinary word |
-| 0.5 | ambiguous clitic, nothing in the sentence resolves it |
-| 0.7 | ambiguous clitic **and** the sentence carries the resolving cue |
-| 1.0 | a listed homograph with two or more readings |
+| pronunciation | the mel frames the aligner assigns to that word |
+| context | the frozen LM's vector for that occurrence |
 
-The compute penalty then prices each token by `1 - relief * difficulty`. At
-`difficulty_relief: 0.75` an ambiguous token pays 25% of what an ordinary token
-pays per step — depth where it is needed becomes affordable, while easy words
-stay under full pressure.
+For every word type with enough occurrences:
 
-A uniform penalty asks the router to make *every* token cheap, which is the
-wrong objective. The claim is not that computation is wasteful; it is that
-computation should go where the difficulty is.
+1. **Cluster its pronunciations.** Each occurrence becomes a fixed-size
+   acoustic descriptor -- the span split into four slices, each averaged, so
+   the word's *shape over time* is preserved. A single mean over the whole
+   word would wash out exactly the vowel differences that separate `3alam`
+   from `3elm`. Two-means gives the cluster separation.
 
-`difficulty_contrast_weight` adds a hinge requiring hard tokens to run at least
-`difficulty_margin` deeper than easy ones — because the relief term alone can
-be satisfied by a router that is simply uniformly shallow.
+2. **Ask whether context predicts the cluster.** A nearest-centroid
+   classifier on the LM vectors under leave-one-out, scored against the
+   majority-class baseline.
 
-**The lexicon is a prior, not an oracle.** It is hand-built and partial. It is
-used for a training-time penalty weight and for building probe sets; the model
-never consults it at inference time and must generalise from context. An
-unlisted homograph simply gets the default score.
+The score is the product. **Both halves must hold**: acoustic variation that
+context cannot predict is noise (different prosodic positions, a cough), and
+context that predicts nothing acoustic is irrelevant to pronunciation. This
+second test is the load-bearing one -- without it, any word appearing in
+varied positions would be flagged.
 
----
+Validated on synthetic data with known ground truth
+(`tests/test_arabic.py`): a word with two context-predicted clusters scores
+**1.00**, the same acoustic variation with *unrelated* context scores
+**0.00**, a stable word scores **0.00**, and a word below `--min-count` is
+skipped rather than guessed at.
+
+#### Bootstrapping
+
+Acoustic evidence needs durations, which need a trained aligner, so this is a
+two-pass workflow:
+
+```
+preprocess → mine (text-only) → train → re-mine (acoustic) → continue training
+```
+
+The text-only pass uses LM vectors alone and needs no audio: a word whose
+contextual embeddings spread out is one whose *meaning* shifts with context.
+That is weaker evidence -- a spread of meaning does not always imply a spread
+of pronunciation, as English `bank` shows -- so it only bootstraps.
+
+Before any mining, the dataset falls back to a **structural prior**: a word
+ending in a bare kaf carries a second-person clitic whose vowel is never
+written. That is a fact about Arabic orthography, true of any word with that
+ending, so it needs no list. The trainer prints which source is in use at step
+0.
+
+#### How the score is used
+
+The compute penalty prices each token by `1 - relief * ambiguity`. At
+`difficulty_relief: 0.75` a maximally ambiguous token pays 25% of what an
+ordinary token pays per step -- depth where it is needed becomes affordable,
+while easy words stay under full pressure. A uniform penalty would ask the
+router to make *every* token cheap, which is the wrong objective: the claim is
+not that computation is wasteful, but that it should go where the difficulty
+is.
+
+`difficulty_contrast_weight` adds a hinge requiring hard tokens to run at
+least `difficulty_margin` deeper than easy ones, because the relief term alone
+is satisfiable by a router that is simply uniformly shallow.
+
+**The score is a prior on the penalty, never an answer.** It says where
+thinking is cheap; it never says which reading is correct. The model never
+sees these scores at inference and must resolve the reading from context.
+
+### The probe sentences are mined too
+
+Hand-written probes have the same defect as a hand-written lexicon: they test
+what the author imagined rather than what the corpus contains, and a model can
+score well on them while failing on its actual distribution. `build_probe_set`
+takes, for each measured-ambiguous word, the two corpus utterances whose
+contexts differ most -- a real minimal pair from the training distribution.
+
+When mining has not run, the probe sets are **empty** and the trainer says so,
+rather than silently substituting invented sentences.
 
 ## Running it
 
 ```bash
 python scripts/prepare_egyptian.py --out data/egyptian
-python scripts/preprocess.py --config configs/egyptian_homograph.yaml --workers 8
-python scripts/train.py      --config configs/egyptian_homograph.yaml
+python scripts/preprocess.py     --config configs/egyptian_homograph.yaml --workers 8
+python scripts/mine_ambiguity.py --config configs/egyptian_homograph.yaml   # text-only
+python scripts/train.py          --config configs/egyptian_homograph.yaml
+
+# once align/entropy_ratio is below 0.3, re-mine with acoustic evidence
+python scripts/mine_ambiguity.py --config configs/egyptian_homograph.yaml     --checkpoint runs/egyptian_homograph/checkpoints/best.pt
+python scripts/train.py --config configs/egyptian_homograph.yaml     --resume runs/egyptian_homograph/checkpoints/final.pt
 ```
 
 | config | what it is |
@@ -205,7 +281,7 @@ The metrics, in the order they can invalidate each other:
 | `align/entropy_ratio` | falls below 0.3 | **check first** — at ~1.0 the aligner is at chance and nothing downstream means anything |
 | `val/mcd_vs_chance` | well below 1.0 | at ≥1.0 the audio carries no information about which sentence was asked for |
 | `semantic/delta_norm` | rises above 0 | the LM path escaped its zero init. If it stays at 0, any homograph result comes from somewhere else |
-| `compute/difficulty_contrast` | > 0 | **the claim**: ambiguous tokens get more depth than ordinary ones |
+| `compute/difficulty_contrast` | > 0 | ambiguous tokens get more depth. Note this is *partly by construction* -- the penalty makes their depth cheap -- so it evidences the mechanism, not discovery |
 | `compute/encoder_depth_spread` | > 0 | at ~0 the router collapsed to a constant, whatever the mean says |
 | `homograph/divergence_ratio` | > 1 | ambiguous words are *rendered differently* across contexts |
 | `probe/length_corr` | not ~1 | at ~1 the router only learned "longer = more" |
@@ -214,11 +290,9 @@ The metrics, in the order they can invalidate each other:
 
 A positive number on the main run means little alone.
 
-* **Tongue twisters must stay cheap.** They are hard phonetics with easy
-  semantics. If they cost as much as the homographs, the router is tracking
-  articulatory or character-level difficulty, not ambiguity. That is a real
-  finding, but a different claim than this experiment set out to test.
-* **`long_easy` must stay cheap.** Otherwise compute tracks length.
+* **`long_easy` must stay cheap.** Long but unambiguous utterances, selected
+  by the mined scores. If they cost as much as the ambiguous ones, compute is
+  tracking length rather than difficulty.
 * **`egyptian_nosemantic` must be weaker.** If it separates the readings just
   as well, the character encoder was sufficient and MARBERT is dead weight
   worth deleting.

@@ -41,13 +41,19 @@ class ProbeSentence:
 def load_probe_sentences(cfg) -> list[ProbeSentence]:
     """Probe sentences from the config, or a named built-in set.
 
-    `log.probe_set: arabic` builds the Egyptian set programmatically from
-    `text/homographs_ar.py`, so the probe sentences and the difficulty
-    lexicon can never drift apart.
+    `log.probe_set: arabic` mines the Egyptian set from the corpus itself,
+    using the measured ambiguity scores, so the probes are in-domain and
+    cannot drift apart from the difficulty signal.
     """
-    items = cfg.log.get("test_sentences", [])
-    if not items and str(cfg.log.get("probe_set", "")).lower() in {"arabic", "ar", "egyptian"}:
-        items = _arabic_probe_sentences()
+    # `probe_set` WINS over any inherited `test_sentences`. base.yaml ships
+    # the English probe list, so a config that inherits from it always has
+    # one -- which meant an Arabic run silently probed English sentences.
+    # Selecting on probe_set first makes that impossible.
+    probe_set = str(cfg.log.get("probe_set", "")).lower()
+    if probe_set in {"arabic", "ar", "egyptian", "mined"}:
+        items = _arabic_probe_sentences(cfg)
+    else:
+        items = cfg.log.get("test_sentences", [])
     out = []
     for it in items:
         if isinstance(it, str):
@@ -62,25 +68,48 @@ def load_probe_sentences(cfg) -> list[ProbeSentence]:
     return out
 
 
-def _arabic_probe_sentences() -> list[dict]:
-    """The Egyptian probe set: one entry per group, built from the lexicon."""
-    from ..text.homographs_ar import ARABIC_PAIRS, EASY, LONG_EASY, TONGUE_TWISTERS
+def _arabic_probe_sentences(cfg) -> list[dict]:
+    """The Egyptian probe set, MINED from the corpus.
+
+    Hand-written probe sentences have the same defect as a hand-written
+    homograph list: they test what the author imagined rather than what the
+    corpus contains, and a model can look good on them while failing on the
+    distribution it was trained on. Mining them keeps the probes in-domain by
+    construction, and means they improve automatically as the ambiguity
+    measurement does.
+
+    Requires `ambiguity.json` (scripts/mine_ambiguity.py). Without it there
+    is nothing principled to select on, so the probe set is left empty and
+    the trainer says so rather than silently substituting invented sentences.
+    """
+    import json
+
+    from ..text.ambiguity import AmbiguityTable
+    from ..text.homographs_ar import build_probe_set
+
+    pre = Path(cfg.data.preprocessed_dir)
+    amb_path = pre / cfg.loss.compute.get("ambiguity_file", "ambiguity.json")
+    index = pre / "train.jsonl"
+    if not amb_path.exists() or not index.exists():
+        return []
+
+    rows = [json.loads(l) for l in index.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+    table = AmbiguityTable.load(amb_path)
+    n_pairs = int(cfg.log.get("probe_n_pairs", 8))
+    ps = build_probe_set(rows, table, n_pairs=n_pairs)
 
     items: list[dict] = []
-    for text in EASY:
+    for text in ps.easy:
         items.append({"text": text, "group": "easy",
-                      "note": "trivial -- must be the cheapest and fastest"})
-    for pr in ARABIC_PAIRS:
-        items.append({"text": pr.a, "group": f"homograph_{pr.kind}",
-                      "ambiguous_words": [pr.word], "note": pr.note})
-        items.append({"text": pr.b, "group": f"homograph_{pr.kind}",
-                      "ambiguous_words": [pr.word], "note": pr.note})
-    for text in TONGUE_TWISTERS:
-        items.append({"text": text, "group": "tongue_twister",
-                      "note": "hard phonetics, easy semantics -- should stay cheap"})
-    for text in LONG_EASY:
+                      "note": "lowest mined ambiguity -- must be cheapest and fastest"})
+    for pr in ps.pairs:
+        for text in (pr.a, pr.b):
+            items.append({"text": text, "group": f"homograph_{pr.kind}",
+                          "ambiguous_words": [pr.word], "note": pr.note})
+    for text in ps.long_easy:
         items.append({"text": text, "group": "long_easy",
-                      "note": "long but trivial -- length must NOT imply compute"})
+                      "note": "long but unambiguous -- length must NOT imply compute"})
     return items
 
 

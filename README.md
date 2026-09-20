@@ -243,15 +243,28 @@ adaptive routing  ->  how much computation does that meaning need?
 ```
 
 A frozen dialect-pretrained LM emits one vector per word; a zero-initialised
-adapter injects it into the character states **and into the router**. The
-compute penalty is then priced per token by difficulty, so an ambiguous word
-pays ~25% of what an ordinary word pays per step — depth where it is needed is
-affordable, while `عامل ايه النهاردة؟` stays cheap and fast.
+adapter injects it into the character states **and into the router**.
+
+**Which words are ambiguous is measured, not declared.** There is no homograph
+word list anywhere in this repository — a hand-written one covers nothing of a
+62k-word vocabulary, encodes the author's guesses rather than the corpus, and
+has to be rewritten for every new language. Instead, a homograph is defined by
+what is observable: a spelling whose *pronunciation varies across the corpus*
+**and** whose variant the *context predicts*. `scripts/mine_ambiguity.py`
+clusters each word's aligned mel frames and tests whether the LM vectors
+predict the cluster; both halves must hold, so acoustic variation that context
+cannot explain is correctly rejected as noise. The probe sentences are mined
+the same way, from real corpus utterances.
+
+The compute penalty is then priced per token by that measured score, so an
+ambiguous word pays ~25% of what an ordinary word pays per step — depth where
+it is needed is affordable, while `عامل ايه النهاردة؟` stays cheap and fast.
 
 ```bash
 python scripts/prepare_egyptian.py --out data/egyptian
-python scripts/preprocess.py --config configs/egyptian_homograph.yaml --workers 8
-python scripts/train.py      --config configs/egyptian_homograph.yaml
+python scripts/preprocess.py     --config configs/egyptian_homograph.yaml --workers 8
+python scripts/mine_ambiguity.py --config configs/egyptian_homograph.yaml
+python scripts/train.py          --config configs/egyptian_homograph.yaml
 ```
 
 Because the adapter is zero-initialised, the model at step 0 is *exactly* the
@@ -372,7 +385,9 @@ mint_tts/
 ├── text/
 │   ├── normalizer.py    ordered rule pipeline (num2words, dates, emails, ...)
 │   ├── arabic.py        <- Arabic normalisation: diacritics, digits, folding
-│   ├── homographs_ar.py <- Egyptian homograph lexicon + difficulty scoring
+│   ├── numbers_ar.py    <- Egyptian number verbalisation (not MSA)
+│   ├── ambiguity.py     <- homographs DISCOVERED from audio + context
+│   ├── homographs_ar.py <- Egyptian orthographic structure + probe mining
 │   ├── phonemes.py      char / ar_char / espeak-ng IPA / g2p_en ARPAbet
 │   └── tokenizer.py     tokenisation + word map + persisted symbol table
 ├── data/                mel/pitch/energy extraction, manifests, dataset
@@ -390,8 +405,8 @@ mint_tts/
 ├── training/            trainer, complexity probe, homograph probe
 └── inference/           Synthesizer API
 configs/                 base.yaml + one file per experiment and dataset
-scripts/                 prepare, preprocess, train, synthesize, benchmark,
-                         evaluate, compute_curve, inspect_frontend,
+scripts/                 prepare, preprocess, mine_ambiguity, train, synthesize,
+                         benchmark, evaluate, compute_curve, inspect_frontend,
                          homograph_coverage, download_vocoder, make_diagrams
 docs/                    how it works, hypothesis, architecture, data, experiments
 tests/                   99 tests, ~20 s

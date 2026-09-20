@@ -23,10 +23,15 @@
 #      and "how much compute does it need" are answered by different parts of
 #      the system.
 #
-#   3. A difficulty-aware compute penalty. A uniform penalty asks the router
-#      to make every token cheap, which is the wrong objective. Here an
-#      ambiguous token pays a quarter of the per-step price, so depth on the
-#      hard words is affordable while the easy ones stay under pressure.
+#   3. A difficulty-aware compute penalty, over ambiguity DISCOVERED from the
+#      corpus rather than a hand-written word list. A word is ambiguous when
+#      its pronunciation varies across the corpus and context predicts which
+#      variant occurs -- both measurable, neither declared. An ambiguous token
+#      then pays a quarter of the per-step price, so depth on the hard words
+#      is affordable while the easy ones stay under pressure.
+#
+# Order of operations (the mining pass needs a working aligner):
+#   preprocess -> mine (text-only) -> train -> re-mine (acoustic) -> train on
 #
 # Sized for an H200 (140 GB). See `egyptian_homograph_small.yaml` for a
 # version that fits a 24 GB card.
@@ -137,6 +142,15 @@ loss:
     decoder_weight: 1.0
 
     # -- difficulty-aware allocation -----------------------------------
+    # Which words are ambiguous is MEASURED from the corpus, never declared:
+    # scripts/mine_ambiguity.py clusters each word's pronunciations and asks
+    # whether context predicts the cluster. There is no homograph word list
+    # anywhere in this repository.
+    #
+    # Until that pass has run, the dataset falls back to a structural prior
+    # (words ending in an unwritten-vowel clitic), and the trainer says so at
+    # step 0.
+    ambiguity_file: ambiguity.json
     # A maximally ambiguous token pays 1 - 0.75 = 25% of the per-step price
     # an ordinary token pays.
     difficulty_relief: 0.75
@@ -207,10 +221,14 @@ log:
   probe_max_figures: 6
   probe_max_audio: 16
 
-  # Built-in Egyptian sets, generated from text/homographs_ar.py so the probe
-  # sentences and the difficulty lexicon cannot drift apart.
+  # Probe sentences and minimal pairs are MINED from the corpus (using the
+  # measured ambiguity scores), so they are in-domain by construction rather
+  # than sentences someone imagined. Both are empty until
+  # scripts/mine_ambiguity.py has run, and the trainer warns when they are.
   probe_set: arabic
   homograph_set: arabic
+  probe_n_pairs: 8
+  homograph_n_pairs: 10
   homograph_probe: true
   homograph_audio: true
   homograph_max_audio: 8

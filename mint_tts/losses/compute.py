@@ -71,6 +71,9 @@ class ComputeLoss(nn.Module):
         self.difficulty_relief = float(c.get("difficulty_relief", 0.0))
         self.difficulty_contrast_weight = float(c.get("difficulty_contrast_weight", 0.0))
         self.difficulty_margin = float(c.get("difficulty_margin", 0.15))
+        # Above this a token counts as "hard" for the reported contrast. 0 is
+        # deliberate: any measured ambiguity at all belongs in the hard bucket.
+        self.difficulty_threshold = float(c.get("difficulty_threshold", 0.0))
 
     def lambda_at(self, step: int) -> float:
         if step < self.warmup_steps:
@@ -114,11 +117,23 @@ class ComputeLoss(nn.Module):
 
         # Diagnostic: the depth actually spent on hard vs easy tokens. This is
         # the number that says whether allocation is happening at all.
-        hard = (d > 0.5).to(m.dtype) * m
-        easy = ((d <= 0.5).to(m.dtype)) * m
-        hard_depth = (tok * hard).sum() / hard.sum().clamp_min(1.0)
+        #
+        # The split is at *any* non-zero difficulty, not at 0.5. The
+        # structural bootstrap scores clitics exactly 0.5, so a `> 0.5`
+        # threshold put every one of them in the "easy" bucket and left the
+        # hard bucket empty -- which reported a large negative contrast for a
+        # model that was simply uniform.
+        hard = (d > self.difficulty_threshold).to(m.dtype) * m
+        easy = ((d <= self.difficulty_threshold).to(m.dtype)) * m
+        n_hard = hard.sum()
+        hard_depth = (tok * hard).sum() / n_hard.clamp_min(1.0)
         easy_depth = (tok * easy).sum() / easy.sum().clamp_min(1.0)
-        return weighted, hard_depth, easy_depth, hard.sum()
+        # With no hard tokens in the batch there is no contrast to report;
+        # returning easy_depth makes the logged difference exactly 0 rather
+        # than a spurious -easy_depth.
+        if float(n_hard) == 0.0:
+            hard_depth = easy_depth
+        return weighted, hard_depth, easy_depth, n_hard
 
     def forward(self, out, budget: torch.Tensor | None, step: int,
                 c_star: torch.Tensor | None = None,

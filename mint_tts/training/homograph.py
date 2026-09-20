@@ -68,12 +68,11 @@ DEFAULT_PAIRS = [
 
 
 def load_pairs(cfg) -> list[MinimalPair]:
-    """Minimal pairs, from the config or from a named built-in set.
+    """Minimal pairs: explicit in the config, or mined from the corpus.
 
-    `log.homograph_set: arabic` selects the Egyptian Arabic pairs, which
-    include the clitic-agreement cases whose disambiguating evidence sits
-    several words away -- the hardest class, and the one this retarget exists
-    for.
+    `log.homograph_set: arabic` (or `mined`) takes the pairs from the
+    measured ambiguity table rather than from a hand-written list -- see
+    `_mined_pairs`.
     """
     items = cfg.log.get("homograph_pairs", None)
     if items:
@@ -84,15 +83,43 @@ def load_pairs(cfg) -> list[MinimalPair]:
             for it in items
         ]
     name = str(cfg.log.get("homograph_set", "english")).lower()
-    if name in {"arabic", "ar", "egyptian"}:
-        from ..text.homographs_ar import ARABIC_PAIRS
-
-        return [
-            MinimalPair(word=pr.word, sentence_a=pr.a, sentence_b=pr.b,
-                        note=pr.note, extras={"kind": pr.kind})
-            for pr in ARABIC_PAIRS
-        ]
+    if name in {"arabic", "ar", "egyptian", "mined"}:
+        return _mined_pairs(cfg)
     return list(DEFAULT_PAIRS)
+
+
+def _mined_pairs(cfg) -> list[MinimalPair]:
+    """Minimal pairs taken from the corpus, for the words measured ambiguous.
+
+    No word list is consulted. `scripts/mine_ambiguity.py` decides which
+    spellings vary in pronunciation with context; this picks, for each of
+    them, the two corpus utterances whose contexts differ most -- a real
+    minimal pair from the training distribution rather than an invented one.
+
+    Returns an empty list when the mining pass has not run, so the trainer
+    can say the probe is unavailable instead of quietly probing sentences
+    somebody made up.
+    """
+    import json
+    from pathlib import Path
+
+    from ..text.ambiguity import AmbiguityTable
+    from ..text.homographs_ar import build_probe_set
+
+    pre = Path(cfg.data.preprocessed_dir)
+    amb_path = pre / cfg.loss.compute.get("ambiguity_file", "ambiguity.json")
+    index = pre / "train.jsonl"
+    if not amb_path.exists() or not index.exists():
+        return []
+    rows = [json.loads(l) for l in index.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+    ps = build_probe_set(rows, AmbiguityTable.load(amb_path),
+                         n_pairs=int(cfg.log.get("homograph_n_pairs", 10)))
+    return [
+        MinimalPair(word=pr.word, sentence_a=pr.a, sentence_b=pr.b,
+                    note=pr.note, extras={"kind": pr.kind})
+        for pr in ps.pairs
+    ]
 
 
 def word_frame_span(word_index: int, word_ids: list[int], durations) -> tuple[int, int]:

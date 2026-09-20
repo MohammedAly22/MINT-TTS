@@ -11,7 +11,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..modules.aligner import beta_binomial_prior
-from ..text.homographs_ar import difficulty_profile
+from ..text.ambiguity import AmbiguityTable
+from ..text.homographs_ar import structural_difficulty
 
 
 def resolve_dataset_fields(cfg, preprocessed_dir: Path) -> dict:
@@ -69,6 +70,15 @@ class TTSDataset(Dataset):
         self.use_difficulty = float(
             cfg.loss.get("compute", {}).get("difficulty_relief", 0.0)
         ) > 0
+        # Difficulty comes from MINED scores when they exist, and from the
+        # structural prior (unwritten-vowel clitics) until then. There is no
+        # hand-written word list in either path: see text/ambiguity.py.
+        self.ambiguity = None
+        if self.use_difficulty:
+            amb_path = Path(cfg.data.preprocessed_dir) / cfg.loss.compute.get(
+                "ambiguity_file", "ambiguity.json")
+            if amb_path.exists():
+                self.ambiguity = AmbiguityTable.load(amb_path)
         ref = cfg.model.get("reference_encoder", {}) or {}
         self.use_reference = bool(ref.get("enabled", False))
         self.reference_frames = int(ref.get("reference_frames", 256))
@@ -141,12 +151,20 @@ class TTSDataset(Dataset):
         return item
 
     def _difficulty(self, row: dict, n_tokens: int) -> torch.Tensor:
-        """Per-token difficulty, broadcast from the per-word score."""
+        """Per-token difficulty, broadcast from the per-word score.
+
+        Mined scores when available, else the structural prior. Both are
+        derived rather than declared -- nothing here consults a homograph
+        list, because there is not one.
+        """
         words = row.get("words", [])
         word_ids = row.get("word_ids", [])
         if not words or not word_ids:
             return torch.zeros(n_tokens)
-        per_word = difficulty_profile(words)
+        if self.ambiguity is not None:
+            per_word = self.ambiguity.profile(words)
+        else:
+            per_word = structural_difficulty(words)
         out = torch.zeros(n_tokens)
         for t, w in enumerate(word_ids[:n_tokens]):
             if 0 <= w < len(per_word):
