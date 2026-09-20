@@ -65,6 +65,9 @@ class Synthesizer:
         self.tp = text_processor
         self.device = device
         self.vocoder = vocoder
+        # Set here as well as in `_init_semantic`, so a Synthesizer built
+        # directly (tests, notebooks) is usable without that call.
+        self.semantic_encoder = None
 
     # -- construction -----------------------------------------------------
     @classmethod
@@ -102,7 +105,52 @@ class Synthesizer:
                 voc = Vocoder(cfg, device=dev)
             except Exception as exc:
                 print(f"[warn] vocoder unavailable ({exc}); returning mel only")
-        return cls(cfg, model, tp, dev, voc)
+        syn = cls(cfg, model, tp, dev, voc)
+        syn._init_semantic()
+        return syn
+
+    def _init_semantic(self) -> None:
+        """Load the frozen LM if this checkpoint was trained with semantics.
+
+        Unlike training, inference has no cache to read from -- the sentence
+        is new -- so the LM must run here. It is still frozen and still
+        counted separately in the FLOP report.
+        """
+        self.semantic_encoder = None
+        if not getattr(self.model, "use_semantic", False):
+            return
+        sem_cfg = self.cfg.model.get("semantic", {}) or {}
+        try:
+            from ..modules.semantic import SemanticEncoder
+
+            self.semantic_encoder = SemanticEncoder(
+                sem_cfg.get("model", "marbert"),
+                layer=int(sem_cfg.get("layer", -1)),
+                device=str(self.device),
+            )
+        except Exception as exc:
+            # Silently synthesising without semantics would produce audio that
+            # sounds plausible but resolves every homograph wrongly, which is
+            # far worse than a loud failure.
+            raise RuntimeError(
+                f"This checkpoint was trained with semantic conditioning but the "
+                f"language model could not be loaded ({exc}). Synthesising "
+                f"without it would disable homograph disambiguation. "
+                f"Install `transformers` and ensure "
+                f"'{sem_cfg.get('model', 'marbert')}' is available."
+            ) from exc
+
+    def _semantic_for(self, enc):
+        """(semantic, word_index) tensors for one encoded utterance."""
+        if self.semantic_encoder is None:
+            return None, None
+        feats = self.semantic_encoder.encode(enc.words)
+        sem = torch.from_numpy(feats.vectors).float().unsqueeze(0).to(self.device)
+        if sem.shape[1] == 0:
+            sem = torch.zeros(1, 1, self.semantic_encoder.hidden_size, device=self.device)
+        widx = torch.tensor(enc.word_ids, dtype=torch.long, device=self.device)
+        widx = widx.clamp(0, sem.shape[1] - 1).unsqueeze(0)
+        return sem, widx
 
     # -- synthesis --------------------------------------------------------
     @torch.inference_mode()
@@ -110,7 +158,8 @@ class Synthesizer:
                  hard_routing: bool = True, return_audio: bool = True,
                  duration_scale: float = 1.0, encoder_max_steps: int | None = None,
                  decoder_max_steps: int | None = None, speaker: int = 0,
-                 emotion: int = 0) -> SynthesisResult:
+                 emotion: int = 0, reference_wav: str | Path | None = None,
+                 reference_mel: torch.Tensor | None = None) -> SynthesisResult:
         import time
 
         enc = self.tp.encode(text)
@@ -120,11 +169,16 @@ class Synthesizer:
         spk = torch.tensor([speaker], device=self.device) if self.model.speaker_emb else None
         emo = torch.tensor([emotion], device=self.device) if self.model.emotion_emb else None
 
+        sem, widx = self._semantic_for(enc)
+        ref, ref_lens = self._reference(reference_wav, reference_mel)
+
         t0 = time.perf_counter()
         out = self.model(tokens, lens, budget=budget, hard=hard_routing,
                          duration_scale=duration_scale, speakers=spk, emotions=emo,
                          encoder_max_steps=encoder_max_steps,
-                         decoder_max_steps=decoder_max_steps)
+                         decoder_max_steps=decoder_max_steps,
+                         semantic=sem, word_index=widx,
+                         reference_mel=ref, reference_lens=ref_lens)
         latency = (time.perf_counter() - t0) * 1000.0
 
         L = int(out.mel_mask[0].sum().item())
@@ -145,6 +199,23 @@ class Synthesizer:
             flops=self.model.flops(out), sample_rate=self.cfg.audio.sample_rate,
             latency_ms=latency,
         )
+
+    def _reference(self, reference_wav, reference_mel):
+        """Reference mel for voice cloning, from a wav path or a tensor."""
+        if not getattr(self.model, "use_reference", False):
+            return None, None
+        if reference_mel is None and reference_wav is not None:
+            from ..data.audio import AudioConfig, load_wav, mel_spectrogram
+
+            ac = AudioConfig.from_cfg(self.cfg.audio)
+            reference_mel = mel_spectrogram(load_wav(reference_wav, ac), ac)
+        if reference_mel is None:
+            return None, None          # the model falls back to its unknown token
+        if reference_mel.dim() == 2:
+            reference_mel = reference_mel.unsqueeze(0)
+        reference_mel = reference_mel.to(self.device)
+        lens = torch.tensor([reference_mel.shape[-1]], dtype=torch.long, device=self.device)
+        return reference_mel, lens
 
     def batch(self, texts: list[str], **kwargs) -> list[SynthesisResult]:
         return [self(t, **kwargs) for t in texts]

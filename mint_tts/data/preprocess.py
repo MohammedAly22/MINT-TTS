@@ -24,8 +24,11 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from ..config import Config
+from ..text.arabic import build_arabic_normalizer
 from ..text.normalizer import TextNormalizer
-from ..text.tokenizer import SymbolTable, TextProcessor
+from ..modules.semantic import cache_key as semantic_cache_key
+from ..text.tokenizer import SymbolTable, TextProcessor, is_arabic_frontend
 from .audio import (
     AudioConfig,
     compute_energy,
@@ -53,8 +56,19 @@ class PreprocessPaths:
     def energy(self) -> Path:
         return self.out_dir / "energy"
 
-    def mkdirs(self) -> None:
-        for p in (self.mel, self.pitch, self.energy):
+    semantic_key: str = ""
+
+    @property
+    def semantic(self) -> Path:
+        # The (model, layer) key is part of the path so that changing the
+        # language model cannot silently reuse the previous model's vectors.
+        return self.out_dir / f"semantic_{self.semantic_key}"
+
+    def mkdirs(self, with_semantic: bool = False) -> None:
+        dirs = [self.mel, self.pitch, self.energy]
+        if with_semantic:
+            dirs.append(self.semantic)
+        for p in dirs:
             p.mkdir(parents=True, exist_ok=True)
 
 
@@ -68,12 +82,21 @@ def _text_processor(spec: tuple) -> TextProcessor:
     keeps the vocabulary identical no matter how many workers ran.
     """
     (input_type, lowercase, keep_punct, bos_eos, word_boundary, punctuation,
-     skip_steps, phonemizer_items) = spec
+     skip_steps, phonemizer_items, arabic_items) = spec
+    if is_arabic_frontend(input_type):
+        normalizer = build_arabic_normalizer(Config({
+            "arabic": dict(arabic_items),
+            "keep_punctuation": keep_punct,
+            "lowercase": lowercase,
+            "skip_normalisation_steps": list(skip_steps),
+        }))
+    else:
+        normalizer = TextNormalizer(lowercase=lowercase, keep_punctuation=keep_punct,
+                                    skip=tuple(skip_steps))
     return TextProcessor(
         input_type=input_type,
         phonemizer_kwargs=dict(phonemizer_items),
-        normalizer=TextNormalizer(lowercase=lowercase, keep_punctuation=keep_punct,
-                                  skip=tuple(skip_steps)),
+        normalizer=normalizer,
         add_bos_eos=bos_eos,
         add_word_boundary=word_boundary,
         add_punctuation=punctuation,
@@ -98,6 +121,7 @@ def _spec_from_cfg(cfg) -> tuple:
         bool(t.get("add_punctuation", True)),
         tuple(t.get("skip_normalisation_steps", [])),
         tuple(sorted(dict(t.get("phonemizer", {}) or {}).items())),
+        tuple(sorted(dict(t.get("arabic", {}) or {}).items())),
     )
 
 
@@ -174,8 +198,14 @@ def normalise_stats(rows: list[dict], key: str) -> tuple[float, float]:
 def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "train",
                    n_workers: int = 1, limit: int | None = None) -> dict:
     root = Path(cfg.data.root)
-    paths = PreprocessPaths(Path(out_dir))
-    paths.mkdirs()
+    sem_cfg = cfg.model.get("semantic", {}) or {}
+    want_semantic = bool(sem_cfg.get("enabled", False)) and bool(sem_cfg.get("precompute", True))
+    sem_key = (
+        semantic_cache_key(sem_cfg.get("model", "marbert"), int(sem_cfg.get("layer", -1)))
+        if want_semantic else ""
+    )
+    paths = PreprocessPaths(Path(out_dir), semantic_key=sem_key)
+    paths.mkdirs(with_semantic=want_semantic)
     ac = AudioConfig.from_cfg(cfg.audio)
     tp_spec = _spec_from_cfg(cfg)
     records = read_manifest(manifest_path, list(cfg.data.get("columns", ["audio", "text"])),
@@ -224,6 +254,20 @@ def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "tra
         row["tokens"] = table.encode(row["token_strings"])
         unknown += sum(1 for t in row["token_strings"] if t not in table.symbols)
 
+    # -- contextual semantic features ------------------------------------
+    # Run AFTER tokenisation so the LM is given exactly the word list the
+    # model will index with `word_ids`, and done here in the parent rather
+    # than in the workers so one language model is loaded, not `n_workers`.
+    semantic_info = {}
+    if want_semantic and rows:
+        semantic_info = extract_semantics(
+            rows, paths.semantic,
+            model_name=sem_cfg.get("model", "marbert"),
+            layer=int(sem_cfg.get("layer", -1)),
+            device=sem_cfg.get("device", "auto"),
+            batch_log=split_name,
+        )
+
     speaker_map, emotion_map = build_label_maps(records)
     out_index = Path(out_dir) / f"{split_name}.jsonl"
     write_jsonl(out_index, rows)
@@ -246,6 +290,7 @@ def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "tra
             "input_type": tp_spec[0],
             "symbols_file": str(symbols_path.as_posix()),
         }
+        stats.update(semantic_info)
         (Path(out_dir) / "stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
 
     if errors:
@@ -255,4 +300,38 @@ def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "tra
     misaligned = getattr(_text_processor(tp_spec).phonemizer, "_misaligned", 0)
     return {"n_ok": len(rows), "n_error": len(errors), "index": str(out_index),
             "vocab_size": len(table), "unknown_symbols": unknown,
-            "phonemizer_realigned": int(misaligned), "stats": stats}
+            "phonemizer_realigned": int(misaligned), "stats": stats,
+            "semantic": semantic_info}
+
+
+def extract_semantics(rows: list[dict], out_dir: Path, model_name: str = "marbert",
+                      layer: int = -1, device: str = "auto",
+                      batch_log: str = "train") -> dict:
+    """Cache one contextual vector per word, per utterance.
+
+    Writing these to disk is what keeps the language model out of the training
+    loop entirely: a 163M-parameter BERT forward pass per step would otherwise
+    dominate a ~40M-parameter acoustic model and make "fast" untrue.
+    """
+    from ..modules.semantic import SemanticEncoder, resolve_model_name
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    enc = SemanticEncoder(model_name, layer=layer, device=device)
+    n_written = 0
+    for row in tqdm(rows, desc=f"semantic[{batch_log}]"):
+        feats = enc.encode(row["words"])
+        path = out_dir / f"{row['uid']}.npy"
+        np.save(path, feats.vectors.astype(np.float32))
+        row["semantic"] = str(path.as_posix())
+        row["n_words"] = len(row["words"])
+        n_written += 1
+    return {
+        "semantic_model": resolve_model_name(model_name),
+        "semantic_layer": int(layer),
+        "semantic_hidden_size": int(enc.hidden_size),
+        "semantic_dir": str(out_dir.as_posix()),
+        "semantic_files": n_written,
+        "semantic_word_fallbacks": int(enc._fallbacks),
+    }

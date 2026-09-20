@@ -1,0 +1,28 @@
+# =============================================================================
+# CONTROL: the same model with NO language-model features.
+#
+#   python scripts/train.py --config configs/egyptian_nosemantic.yaml
+#
+# This is the ablation that decides what the main run actually showed. If
+# `egyptian_homograph` separates the readings of a homograph and this one
+# does too, then the character encoder was sufficient all along and MARBERT
+# is dead weight worth deleting. If this one flattens -- homograph
+# divergence_ratio near 1 while the main run is well above it -- then the
+# semantic path is doing the work, which is the claim.
+#
+# Nothing else changes: same data, same seed, same schedule, same everything.
+# Run them back to back and compare `homograph/divergence_ratio` and
+# `compute/difficulty_contrast`.
+#
+# NOTE: preprocessing is shared. The cached MARBERT vectors are simply not
+# read by this run, so there is no need to preprocess twice.
+# =============================================================================
+
+_base_: egyptian_homograph.yaml
+
+model:
+  semantic:
+    enabled: false
+
+log:
+  run_name: egyptian_nosemantic

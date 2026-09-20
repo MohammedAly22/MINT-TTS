@@ -16,9 +16,44 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .arabic import build_arabic_normalizer
 from .normalizer import TextNormalizer
 from .phonemes import WORD_RE, build_phonemizer
-from .symbols import BOS, EOS, PAD, PUNCTUATION, SPACE, SPECIALS, UNK
+from .symbols import (
+    ARABIC_LETTERS_LIST,
+    BOS,
+    EOS,
+    LETTERS,
+    PAD,
+    PUNCTUATION,
+    SPACE,
+    SPECIALS,
+    UNK,
+)
+
+# Frontends whose text is Arabic script and therefore needs the Arabic
+# normaliser rather than the ASCII-folding English one.
+ARABIC_FRONTENDS = ("ar_char",)
+
+
+def is_arabic_frontend(input_type: str) -> bool:
+    return input_type in ARABIC_FRONTENDS
+
+
+def _seed_letters(input_type: str) -> list[str] | None:
+    """Letters to pre-seed the symbol table with, for identity frontends.
+
+    Seeding is a convenience only -- preprocessing grows the table from the
+    corpus regardless -- but it keeps the ids of common letters stable across
+    runs, which makes two checkpoints' embeddings comparable.
+    """
+    if input_type == "char":
+        return list(LETTERS)
+    if input_type == "ar_char":
+        # Latin letters are included too: Egyptian speech code-switches, and
+        # the corpus contains Latin tokens that must not become <unk>.
+        return list(ARABIC_LETTERS_LIST) + list(LETTERS)
+    return None
 
 _TOKEN_RE = WORD_RE
 
@@ -120,9 +155,7 @@ class TextProcessor:
         elif isinstance(symbols, list):
             self.symbol_table = SymbolTable(symbols)
         else:
-            self.symbol_table = SymbolTable.build(
-                list("abcdefghijklmnopqrstuvwxyz'") if self.input_type == "char" else None
-            )
+            self.symbol_table = SymbolTable.build(_seed_letters(self.input_type))
 
     # -- properties -------------------------------------------------------
     @property
@@ -216,17 +249,25 @@ def build_text_processor(cfg, symbols=None) -> TextProcessor:
         if candidate and Path(candidate).exists():
             symbols = candidate
     kwargs = dict(t.get("phonemizer", {}) or {})
-    normalizer = TextNormalizer(
-        lowercase=t.get("lowercase", True),
-        keep_punctuation=t.get("keep_punctuation", "!'(),-.:;?\""),
-        skip=tuple(t.get("skip_normalisation_steps", [])),
-    )
+    input_type = t.get("input_type", "ipa")
+    if is_arabic_frontend(input_type):
+        # The English pipeline folds everything to ASCII as its last step,
+        # which deletes Arabic entirely -- an Arabic sentence came out as the
+        # empty string. Selecting the normalizer from the frontend keeps that
+        # mistake impossible rather than merely documented.
+        normalizer = build_arabic_normalizer(t)
+    else:
+        normalizer = TextNormalizer(
+            lowercase=t.get("lowercase", True),
+            keep_punctuation=t.get("keep_punctuation", "!'(),-.:;?\""),
+            skip=tuple(t.get("skip_normalisation_steps", [])),
+        )
     # A table loaded from disk IS the model's vocabulary. Growing it would
     # produce ids beyond the embedding table, so growth is only ever allowed
     # while preprocessing is still building the table from scratch.
     allow_growth = symbols is None and t.get("allow_vocab_growth", True)
     return TextProcessor(
-        input_type=t.get("input_type", "ipa"),
+        input_type=input_type,
         phonemizer_kwargs=kwargs,
         normalizer=normalizer,
         add_bos_eos=t.get("add_bos_eos", True),

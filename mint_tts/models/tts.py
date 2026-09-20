@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 
 from ..modules.adaptive import RouterOutput, build_stack
+from ..modules.semantic import SemanticAdapter
+from ..modules.speaker import ReferenceEncoder
 from ..modules.aligner import (
     AlignmentEncoder,
     monotonic_alignment_search,
@@ -32,6 +34,7 @@ from ..modules.variance import (
 )
 from ..utils.flops import (
     FlopReport,
+    conv1d_flops,
     convstack_flops,
     linear_flops,
     stack_flops,
@@ -57,6 +60,8 @@ class TTSOutput:
     attn_hard: torch.Tensor | None = None
     attn_soft: torch.Tensor | None = None
     text_mask: torch.Tensor | None = None
+    semantic_delta_norm: torch.Tensor | None = None   # how much the LM path moved the states
+    speaker_vector: torch.Tensor | None = None
 
 
 class AdaptiveTTS(nn.Module):
@@ -81,7 +86,30 @@ class AdaptiveTTS(nn.Module):
         self.pos_enc = PositionalEncoding(d, max_len=m.get("max_positions", 8192))
         self.pos_dec = PositionalEncoding(d, max_len=m.get("max_positions", 8192))
 
-        self.encoder = build_stack(m.encoder, d)
+        # -- contextual semantics (the homograph path) --------------------
+        # A frozen language model supplies one vector per word; the adapter
+        # projects it into this model and the router reads it directly. See
+        # modules/semantic.py for why depth alone cannot do this job.
+        sem = m.get("semantic", {}) or {}
+        self.use_semantic = bool(sem.get("enabled", False))
+        self.semantic_adapter = None
+        router_ctx = 0
+        if self.use_semantic:
+            self.semantic_adapter = SemanticAdapter(
+                d_model=d,
+                hidden_size=int(sem.get("hidden_size", 768)),
+                proj_hidden=int(sem.get("proj_hidden", 0)) or d,
+                dropout=float(sem.get("dropout", m.get("dropout", 0.1))),
+                use_film=bool(sem.get("use_film", True)),
+            )
+            self.semantic_to_router = bool(sem.get("to_router", True))
+            router_ctx = self.semantic_adapter.out_dim if self.semantic_to_router else 0
+            self.semantic_hidden_size = self.semantic_adapter.hidden_size
+        else:
+            self.semantic_to_router = False
+            self.semantic_hidden_size = 0
+
+        self.encoder = build_stack(m.encoder, d, router_context_dim=router_ctx)
         self.decoder = build_stack(m.decoder, d)
 
         # speaker / emotion conditioning (single-speaker LJSpeech ignores these)
@@ -91,6 +119,26 @@ class AdaptiveTTS(nn.Module):
         self.emotion_emb = (
             nn.Embedding(m.n_emotions, d) if m.get("n_emotions", 0) > 1 else None
         )
+
+        # -- reference-encoder speaker conditioning (zero-shot cloning) ----
+        ref = m.get("reference_encoder", {}) or {}
+        self.use_reference = bool(ref.get("enabled", False))
+        self.reference_encoder = (
+            ReferenceEncoder(
+                n_mels=self.n_mels,
+                d_model=d,
+                hidden=int(ref.get("hidden", 256)),
+                n_layers=int(ref.get("n_layers", 4)),
+                dropout=float(ref.get("dropout", 0.1)),
+            )
+            if self.use_reference
+            else None
+        )
+        self.speaker_dropout = float(ref.get("speaker_dropout", 0.1))
+
+        # -- language embedding (multilingual / code-switching) ------------
+        n_langs = int(m.get("n_languages", 1) or 1)
+        self.language_emb = nn.Embedding(n_langs, d) if n_langs > 1 else None
 
         v = m.variance
         self.duration_predictor = VariancePredictor(
@@ -121,22 +169,61 @@ class AdaptiveTTS(nn.Module):
         self.min_duration = int(m.get("min_duration", 1))
 
     # -- helpers ----------------------------------------------------------
-    def _condition(self, x, speakers, emotions):
+    def _condition(self, x, speakers, emotions, speaker_vec=None, languages=None):
         if self.speaker_emb is not None and speakers is not None:
             x = x + self.speaker_emb(speakers).unsqueeze(1)
         if self.emotion_emb is not None and emotions is not None:
             x = x + self.emotion_emb(emotions).unsqueeze(1)
+        if speaker_vec is not None:
+            x = x + speaker_vec.unsqueeze(1).to(x.dtype)
+        if self.language_emb is not None and languages is not None:
+            x = x + self.language_emb(languages).unsqueeze(1)
         return x
 
+    def encode_speaker(self, reference_mel, reference_lens=None, batch=1,
+                       device=None, dtype=torch.float32):
+        """Reference mel -> speaker vector, or the learned 'unknown' vector.
+
+        Returning the unknown token when no reference is given is what lets
+        the same checkpoint synthesise both with and without a reference.
+        """
+        if self.reference_encoder is None:
+            return None
+        if reference_mel is None:
+            return self.reference_encoder.unknown_vector(batch, device, dtype)
+        vec = self.reference_encoder(reference_mel, reference_lens)
+        return self.reference_encoder.apply_dropout(vec, self.speaker_dropout)
+
     def encode_text(self, tokens, text_mask, budget=None, hard=False, max_steps=None,
-                    speakers=None, emotions=None, force_full_depth=False):
+                    speakers=None, emotions=None, force_full_depth=False,
+                    semantic=None, word_index=None, speaker_vec=None, languages=None):
         emb = self.embedding(tokens) * self.emb_scale
         x = self.encoder_prenet(emb, text_mask)
         x = self.pos_enc(x) * text_mask.unsqueeze(-1)
-        x = self._condition(x, speakers, emotions)
+        x = self._condition(x, speakers, emotions, speaker_vec, languages)
+
+        # -- semantic injection ------------------------------------------
+        # The LM vector for a word is added to every character of that word,
+        # and (optionally) handed to the router as context. Both output heads
+        # are zero-initialised, so this is exactly a no-op at step 0.
+        router_context = None
+        delta_norm = None
+        if self.use_semantic and semantic is not None and word_index is not None:
+            delta, feats = self.semantic_adapter(semantic, word_index, text_mask)
+            film = self.semantic_adapter.film(feats)
+            if film is not None:
+                gamma, beta = film
+                x = x * (1.0 + gamma) + beta
+            x = (x + delta) * text_mask.unsqueeze(-1)
+            if self.semantic_to_router:
+                router_context = feats
+            # Reported so the training curves show whether the semantic path
+            # is actually being used, rather than sitting at its zero init.
+            delta_norm = delta.detach().norm(dim=-1).mean()
+
         enc = self.encoder(x, text_mask, budget=budget, hard=hard, max_steps_override=max_steps,
-                           force_full_depth=force_full_depth)
-        return enc, emb
+                           force_full_depth=force_full_depth, router_context=router_context)
+        return enc, emb, delta_norm
 
     # -- forward ----------------------------------------------------------
     def forward(
@@ -159,10 +246,23 @@ class AdaptiveTTS(nn.Module):
         pitch_scale: float = 1.0,
         energy_scale: float = 1.0,
         force_full_depth: bool = False,
+        semantic: torch.Tensor | None = None,
+        word_index: torch.Tensor | None = None,
+        reference_mel: torch.Tensor | None = None,
+        reference_lens: torch.Tensor | None = None,
+        languages: torch.Tensor | None = None,
     ) -> TTSOutput:
         text_mask = lengths_to_mask(token_lens, tokens.size(1))
-        enc, emb = self.encode_text(tokens, text_mask, budget, hard, encoder_max_steps,
-                                    speakers, emotions, force_full_depth)
+        speaker_vec = self.encode_speaker(
+            reference_mel, reference_lens, batch=tokens.size(0),
+            device=tokens.device, dtype=torch.float32,
+        )
+        enc, emb, semantic_delta = self.encode_text(
+            tokens, text_mask, budget, hard, encoder_max_steps,
+            speakers, emotions, force_full_depth,
+            semantic=semantic, word_index=word_index,
+            speaker_vec=speaker_vec, languages=languages,
+        )
         h = enc.output
 
         attn_logprob = attn_hard = attn_soft = None
@@ -215,7 +315,7 @@ class AdaptiveTTS(nn.Module):
         target_len = int(mels.size(-1)) if training_mode else None
         frames, mel_mask = length_regulate(h, duration_rounded, target_len)
         frames = self.pos_dec(frames) * mel_mask.unsqueeze(-1)
-        frames = self._condition(frames, speakers, emotions)
+        frames = self._condition(frames, speakers, emotions, speaker_vec, languages)
         dec = self.decoder(frames, mel_mask, budget=budget, hard=hard,
                            max_steps_override=decoder_max_steps,
                            force_full_depth=force_full_depth)
@@ -242,6 +342,8 @@ class AdaptiveTTS(nn.Module):
             attn_hard=attn_hard,
             attn_soft=attn_soft,
             text_mask=text_mask,
+            semantic_delta_norm=semantic_delta,
+            speaker_vector=speaker_vec,
         )
 
     # -- inference --------------------------------------------------------
@@ -265,6 +367,28 @@ class AdaptiveTTS(nn.Module):
         T_mel = int(out.mel_mask.sum().item())
         rep.add("embedding", 0.0)
         rep.add("encoder_prenet", convstack_flops(self.encoder_prenet, T_text))
+        if self.use_semantic and out.semantic_delta_norm is not None:
+            # The frozen LM itself is NOT counted here: with
+            # `semantic.precompute: true` it runs once offline, so it costs
+            # nothing per synthesis. The adapter that runs every forward pass
+            # is counted, because it does.
+            a = self.semantic_adapter
+            n_words = int(out.text_mask.sum().item())   # upper bound: one vector per token
+            rep.add("semantic_adapter",
+                    linear_flops(a.hidden_size, a.out_dim, n_words)
+                    + linear_flops(a.out_dim, self.d_model, T_text)
+                    + (linear_flops(a.out_dim, 2 * self.d_model, T_text) if a.use_film else 0.0))
+        if self.use_reference and out.speaker_vector is not None:
+            # Amortised over the utterance: a reference is encoded once, not
+            # per frame, so on a long utterance it is negligible.
+            r = self.reference_encoder
+            ref_len = 256.0
+            ref_flops = 0.0
+            for conv in r.convs:
+                ref_len = max(ref_len / 2.0, 1.0)
+                ref_flops += conv1d_flops(conv.in_channels, conv.out_channels,
+                                          conv.kernel_size[0], ref_len)
+            rep.add("reference_encoder", ref_flops)
         rep.add("encoder", stack_flops(self.encoder, out.encoder_router.token_steps,
                                        out.encoder_router.attn_kv_steps,
                                        out.encoder_router.kv_token_steps))
@@ -281,6 +405,9 @@ class AdaptiveTTS(nn.Module):
 
         # The dense reference must exclude padding, otherwise a batch with
         # ragged lengths would show a "saving" that is really just padding.
+        # Only the adaptive stacks differ between the dense reference and the
+        # routed run; every other part (prenet, adapter, variance, postnet) is
+        # identical, so it is carried across unchanged.
         dense = rep.total - rep.parts["encoder"] - rep.parts["decoder"]
         dense += _dense_flops(self.encoder, out.text_mask)
         dense += _dense_flops(self.decoder, out.mel_mask)

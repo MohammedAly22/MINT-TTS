@@ -46,6 +46,7 @@ reaches quality $q$ for utterance $x$ on a device with capability $h$.
 | | | |
 |---|---|---|
 | **Colab notebook** | run the full experiment on a free GPU | [![Open](https://img.shields.io/badge/open-notebook-F9AB00)](https://colab.research.google.com/github/MohammedAly22/MINT-TTS/blob/main/notebooks/colab_quickstart.ipynb) |
+| **Egyptian Arabic** | the homograph experiment, end to end | [notebook](notebooks/egyptian_homograph.ipynb) · [docs](docs/EGYPTIAN_ARABIC.md) |
 | **How it works** | every term explained from scratch | [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) |
 | **Hypothesis** | the claim, and what would falsify it | [docs/HYPOTHESIS.md](docs/HYPOTHESIS.md) |
 | **Model weights** | pretrained checkpoints | `planned` — Hugging Face |
@@ -207,6 +208,58 @@ specific reason: espeak had already chosen a pronunciation, so no ambiguity ever
 reached the model, and one encoder step was as good as eight. `char` is the
 setting in which the hypothesis is testable at all.
 
+### Egyptian Arabic: where the question is unavoidable
+
+English homographs are a few hundred lexical accidents, and the `ipa` frontend
+resolved most of them before the model ever saw them — which is why that run
+returned a null result. **Undiacritised Arabic does not allow the question to
+be dodged**: the short vowels that distinguish readings are systematically
+absent from the orthography, so every sentence carries some of this ambiguity.
+
+| written | reading A | reading B |
+|---|---|---|
+| `علم` | `عَلَم` *3alam* — flag | `عِلْم` *3elm* — science |
+| `عمرك` | `عُمرَك` *3omrak* — to a man | `عُمرِك` *3omrik* — to a woman |
+| `ضرب` | `ضَرَب` — he hit | `ضُرِب` — he was hit |
+
+The third class is the hard one. In
+
+> **عمرك** فكرت**ي** الراجل بتاع غزل البنات بينفخ الكيس ازاي؟
+
+the only evidence that the addressee is a woman is the feminine verb `فكرتي`,
+**four words later**. The disambiguating signal is non-local — which is exactly
+why per-token depth over full-sentence attention is the right shape of
+solution.
+
+**Adaptive depth alone cannot do this**, and the repo is explicit about why.
+Extra depth gives a token more passes over the *same* representations; what
+decides `علم` here is lexical meaning, and a character encoder trained on 68
+hours cannot learn what a word means from its spelling. So the semantics are
+supplied rather than invented, and the two jobs separate:
+
+```
+frozen MARBERTv2  ->  what does this word mean here?
+adaptive routing  ->  how much computation does that meaning need?
+```
+
+A frozen dialect-pretrained LM emits one vector per word; a zero-initialised
+adapter injects it into the character states **and into the router**. The
+compute penalty is then priced per token by difficulty, so an ambiguous word
+pays ~25% of what an ordinary word pays per step — depth where it is needed is
+affordable, while `عامل ايه النهاردة؟` stays cheap and fast.
+
+```bash
+python scripts/prepare_egyptian.py --out data/egyptian
+python scripts/preprocess.py --config configs/egyptian_homograph.yaml --workers 8
+python scripts/train.py      --config configs/egyptian_homograph.yaml
+```
+
+Because the adapter is zero-initialised, the model at step 0 is *exactly* the
+character-only model — so any difference from `egyptian_nosemantic.yaml` (the
+control with the LM switched off) is learned rather than an initialisation
+artefact. Full detail, including how to read the result and what would falsify
+it: [`docs/EGYPTIAN_ARABIC.md`](docs/EGYPTIAN_ARABIC.md).
+
 ### Normalisation
 
 An ordered rule pipeline over `num2words` — currency before bare numbers, dates
@@ -265,6 +318,7 @@ Details: [`docs/MONITORING.md`](docs/MONITORING.md).
 | VCTK | 110 | 44 | `--dataset vctk --root data/VCTK-Corpus-0.92` |
 | LibriTTS | 2400+ | up to 585 | `--dataset libritts --root data/LibriTTS --subsets train-clean-100` |
 | LibriSpeech | 2400+ | up to 960 | `--dataset librispeech --root data/LibriSpeech` |
+| Egyptian Arabic | 1 | 100 | `python scripts/prepare_egyptian.py --out data/egyptian` |
 
 ```bash
 python scripts/prepare_dataset.py --dataset vctk --root data/VCTK-Corpus-0.92
@@ -317,11 +371,15 @@ mint_tts/
 ├── config.py            YAML configs with _base_ inheritance + CLI overrides
 ├── text/
 │   ├── normalizer.py    ordered rule pipeline (num2words, dates, emails, ...)
-│   ├── phonemes.py      char / espeak-ng IPA / g2p_en ARPAbet backends
+│   ├── arabic.py        <- Arabic normalisation: diacritics, digits, folding
+│   ├── homographs_ar.py <- Egyptian homograph lexicon + difficulty scoring
+│   ├── phonemes.py      char / ar_char / espeak-ng IPA / g2p_en ARPAbet
 │   └── tokenizer.py     tokenisation + word map + persisted symbol table
 ├── data/                mel/pitch/energy extraction, manifests, dataset
 ├── modules/
 │   ├── adaptive.py      <- ACT routing, budget conditioning, gathered fast path
+│   ├── semantic.py      <- frozen LM word vectors -> encoder + router
+│   ├── speaker.py       <- reference encoder (zero-shot voice cloning)
 │   ├── transformer.py   blocks with a dense path and an active-subset path
 │   ├── aligner.py       forward-sum aligner + monotonic alignment search
 │   └── variance.py      duration/pitch/energy predictors, length regulator
@@ -355,6 +413,9 @@ tests/                   99 tests, ~20 s
 | `exp5_unified.yaml` | both, with a hardware budget: full $C^{*}(x,q,h)$ |
 | `frontend_{char,ipa,arpabet}.yaml` | does the frontend disambiguate, or the model? |
 | `vctk_token.yaml` / `libritts_token.yaml` | does the policy transfer across speakers and scale? |
+| **`egyptian_homograph.yaml`** | **Egyptian Arabic**: can it resolve homographs without diacritics? |
+| `egyptian_nosemantic.yaml` | control: the same model with the language model switched off |
+| `egyptian_dense.yaml` | control: no routing — the quality ceiling |
 
 Decision rules and tuning notes: [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
 

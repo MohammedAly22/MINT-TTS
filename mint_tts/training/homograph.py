@@ -68,14 +68,31 @@ DEFAULT_PAIRS = [
 
 
 def load_pairs(cfg) -> list[MinimalPair]:
+    """Minimal pairs, from the config or from a named built-in set.
+
+    `log.homograph_set: arabic` selects the Egyptian Arabic pairs, which
+    include the clitic-agreement cases whose disambiguating evidence sits
+    several words away -- the hardest class, and the one this retarget exists
+    for.
+    """
     items = cfg.log.get("homograph_pairs", None)
-    if not items:
-        return list(DEFAULT_PAIRS)
-    out = []
-    for it in items:
-        out.append(MinimalPair(word=it["word"], sentence_a=it["a"], sentence_b=it["b"],
-                               note=it.get("note", "")))
-    return out
+    if items:
+        return [
+            MinimalPair(word=it["word"], sentence_a=it["a"], sentence_b=it["b"],
+                        note=it.get("note", ""),
+                        extras={"kind": it.get("kind", "")})
+            for it in items
+        ]
+    name = str(cfg.log.get("homograph_set", "english")).lower()
+    if name in {"arabic", "ar", "egyptian"}:
+        from ..text.homographs_ar import ARABIC_PAIRS
+
+        return [
+            MinimalPair(word=pr.word, sentence_a=pr.a, sentence_b=pr.b,
+                        note=pr.note, extras={"kind": pr.kind})
+            for pr in ARABIC_PAIRS
+        ]
+    return list(DEFAULT_PAIRS)
 
 
 def word_frame_span(word_index: int, word_ids: list[int], durations) -> tuple[int, int]:
@@ -103,7 +120,7 @@ def span_distance(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 class HomographProbe:
-    def __init__(self, cfg, text_processor, device):
+    def __init__(self, cfg, text_processor, device, semantic_provider=None):
         self.cfg = cfg
         self.tp = text_processor
         self.device = device
@@ -111,6 +128,9 @@ class HomographProbe:
         self.quality = float(cfg.log.get("homograph_quality", 0.9))
         self.log_audio = bool(cfg.log.get("homograph_audio", True))
         self.max_audio = int(cfg.log.get("homograph_max_audio", 4))
+        # Probe sentences are not in the corpus, so their LM vectors cannot
+        # come from the preprocessing cache and must be computed live.
+        self.semantic = semantic_provider
 
     @torch.inference_mode()
     def _synth(self, model, text: str, routing_frozen: bool):
@@ -118,7 +138,9 @@ class HomographProbe:
         tokens = torch.tensor(enc.ids, dtype=torch.long, device=self.device).unsqueeze(0)
         lens = torch.tensor([len(enc.ids)], dtype=torch.long, device=self.device)
         budget = torch.tensor([[self.quality, 1.0]], device=self.device)
-        out = model(tokens, lens, budget=budget, hard=True, force_full_depth=routing_frozen)
+        sem, widx = (self.semantic(enc) if self.semantic is not None else (None, None))
+        out = model(tokens, lens, budget=budget, hard=True, force_full_depth=routing_frozen,
+                    semantic=sem, word_index=widx)
         return enc, out
 
     @staticmethod
@@ -133,6 +155,7 @@ class HomographProbe:
         model.eval()
         scalars: dict[str, float] = {}
         rows, div, ctrl, dcomp = [], [], [], []
+        div_by_pair = [float("nan")] * len(self.pairs)
 
         for pi, pair in enumerate(self.pairs):
             enc_a, out_a = self._synth(model, pair.sentence_a, routing_frozen)
@@ -166,6 +189,7 @@ class HomographProbe:
             other = float(np.nanmean(others_a)) if others_a else float("nan")
 
             tag = f"homograph/{pair.word}"
+            div_by_pair[pi] = d
             if np.isfinite(d):
                 scalars[f"{tag}/divergence"] = d
                 div.append(d)
@@ -202,6 +226,15 @@ class HomographProbe:
             scalars["homograph/divergence_ratio"] = float(np.mean(div) / np.mean(ctrl))
         if dcomp:
             scalars["homograph/compute_advantage"] = float(np.mean(dcomp))
+        # Per-kind divergence. The three classes fail for different reasons,
+        # so one averaged number would hide which of them the model handles:
+        # `lexical` needs word meaning, `morphological` needs voice/aspect,
+        # and `clitic` needs long-range agreement.
+        for kind in sorted({p.extras.get("kind", "") for p in self.pairs} - {""}):
+            vals = [d for p, d in zip(self.pairs, div_by_pair)
+                    if p.extras.get("kind") == kind and np.isfinite(d)]
+            if vals:
+                scalars[f"homograph/kind/{kind}"] = float(np.mean(vals))
 
         logger.log_table(
             "homograph/table",

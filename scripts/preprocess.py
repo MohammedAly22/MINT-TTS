@@ -59,6 +59,15 @@ def main() -> int:
         if res["stats"]:
             log.info(f"  {res['stats']['n_utterances']} utterances, "
                      f"{res['stats']['total_hours']:.2f} hours")
+        if res.get("semantic"):
+            sem = res["semantic"]
+            log.info(f"  semantic: {sem['semantic_files']} files from "
+                     f"{sem['semantic_model']} (layer {sem['semantic_layer']}, "
+                     f"hidden {sem['semantic_hidden_size']})")
+            if sem.get("semantic_word_fallbacks"):
+                log.warning(f"  {sem['semantic_word_fallbacks']} words needed "
+                            "single-word re-encoding (usually truncation of a "
+                            "very long utterance)")
 
     (out_dir / "preprocess_report.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     log.info(f"Done. Features in {out_dir}")

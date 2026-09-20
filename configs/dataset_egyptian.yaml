@@ -1,0 +1,69 @@
+# =============================================================================
+# 100-hour single-speaker Egyptian Arabic corpus
+#   https://huggingface.co/datasets/ehabnegm/100-hour-Egyptian-dataset-single-speaker
+#
+#   python scripts/prepare_egyptian.py --out data/egyptian
+#
+# Audio is native 24 kHz, so the mel frontend runs at 24 kHz rather than
+# resampling down to LJSpeech's 22.05 kHz: resampling would throw away the
+# top 1 kHz of bandwidth for nothing. The hop is scaled to keep the frame
+# rate close to the LJSpeech recipe (86.1 Hz vs 87.9 Hz), so the aligner and
+# the duration predictor behave as they were tuned to.
+# =============================================================================
+
+audio:
+  sample_rate: 24000
+  n_fft: 1024
+  hop_length: 256        # 93.75 frames/s
+  win_length: 1024
+  n_mels: 80
+  fmin: 0.0
+  fmax: 12000.0          # Nyquist at 24 kHz; keep the full band
+  center: false
+  clip_val: 1.0e-5
+  trim_silence: true
+  trim_top_db: 45.0      # YouTube audio has a higher noise floor than a studio
+  extract_pitch: true
+
+text:
+  input_type: ar_char    # graphemes: every ambiguity reaches the model
+  lowercase: true        # only affects code-switched Latin
+  add_bos_eos: true
+  add_word_boundary: true
+  add_punctuation: true
+  allow_vocab_growth: true
+  arabic:
+    strip_diacritics: true
+    strip_tatweel: true
+    normalise_alef: true
+    normalise_ya: true
+    # Left OFF: ta marbuta carries feminine morphology and surfaces as /t/ in
+    # construct state, so folding it to ha destroys evidence the model needs
+    # for exactly the agreement cases this project targets.
+    normalise_ta_marbuta: false
+    expand_numbers: true
+
+data:
+  root: data/egyptian
+  manifest: filelists/egyptian_all.txt
+  columns: [audio, text]
+  delimiter: "|"
+  preprocessed_dir: data/preprocessed/egyptian
+  train_index: data/preprocessed/egyptian/train.jsonl
+  val_index: data/preprocessed/egyptian/val.jsonl
+  test_index: data/preprocessed/egyptian/test.jsonl
+  # The corpus ships disjoint-by-source-video splits; prepare_egyptian.py
+  # writes them out, so these sizes are not used to cut a random split.
+  val_size: 472
+  test_size: 391
+  # Clips run to 19 s at 93.75 frames/s ~= 1780 frames. 1800 keeps the
+  # longest ones rather than silently discarding the most complex sentences,
+  # which are disproportionately the interesting ones here.
+  max_frames: 1800
+  min_frames: 32
+  # Arabic words are short but the frontend is character-level, so a 19 s
+  # utterance can reach ~450 tokens once word boundaries are counted.
+  max_tokens: 600
+  bucket_by_length: true
+  use_attn_prior: true
+  attn_prior_scaling: 1.0

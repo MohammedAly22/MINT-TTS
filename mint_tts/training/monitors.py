@@ -39,7 +39,15 @@ class ProbeSentence:
 
 
 def load_probe_sentences(cfg) -> list[ProbeSentence]:
+    """Probe sentences from the config, or a named built-in set.
+
+    `log.probe_set: arabic` builds the Egyptian set programmatically from
+    `text/homographs_ar.py`, so the probe sentences and the difficulty
+    lexicon can never drift apart.
+    """
     items = cfg.log.get("test_sentences", [])
+    if not items and str(cfg.log.get("probe_set", "")).lower() in {"arabic", "ar", "egyptian"}:
+        items = _arabic_probe_sentences()
     out = []
     for it in items:
         if isinstance(it, str):
@@ -54,11 +62,34 @@ def load_probe_sentences(cfg) -> list[ProbeSentence]:
     return out
 
 
+def _arabic_probe_sentences() -> list[dict]:
+    """The Egyptian probe set: one entry per group, built from the lexicon."""
+    from ..text.homographs_ar import ARABIC_PAIRS, EASY, LONG_EASY, TONGUE_TWISTERS
+
+    items: list[dict] = []
+    for text in EASY:
+        items.append({"text": text, "group": "easy",
+                      "note": "trivial -- must be the cheapest and fastest"})
+    for pr in ARABIC_PAIRS:
+        items.append({"text": pr.a, "group": f"homograph_{pr.kind}",
+                      "ambiguous_words": [pr.word], "note": pr.note})
+        items.append({"text": pr.b, "group": f"homograph_{pr.kind}",
+                      "ambiguous_words": [pr.word], "note": pr.note})
+    for text in TONGUE_TWISTERS:
+        items.append({"text": text, "group": "tongue_twister",
+                      "note": "hard phonetics, easy semantics -- should stay cheap"})
+    for text in LONG_EASY:
+        items.append({"text": text, "group": "long_easy",
+                      "note": "long but trivial -- length must NOT imply compute"})
+    return items
+
+
 class ComplexityProbe:
-    def __init__(self, cfg, text_processor, device):
+    def __init__(self, cfg, text_processor, device, semantic_provider=None):
         self.cfg = cfg
         self.tp = text_processor
         self.device = device
+        self.semantic = semantic_provider
         self.sentences = load_probe_sentences(cfg)
         self.encoded = [self.tp.encode(s.text) for s in self.sentences]
         self.budgets = list(cfg.log.get("probe_budgets", [0.2, 0.5, 0.9]))
@@ -84,13 +115,15 @@ class ComplexityProbe:
         for si, (sent, enc) in enumerate(zip(self.sentences, self.encoded)):
             tokens = torch.tensor(enc.ids, dtype=torch.long, device=self.device).unsqueeze(0)
             lens = torch.tensor([len(enc.ids)], dtype=torch.long, device=self.device)
+            sem, widx = (self.semantic(enc) if self.semantic is not None else (None, None))
             for q in self.budgets:
                 budget = torch.tensor([[float(q), 1.0]], device=self.device)
                 # Mirror training: while routing is frozen the router is bypassed
                 # entirely, so probing it would report a policy the model is not
                 # being trained with.
                 out = model(tokens, lens, budget=budget, hard=hard,
-                            force_full_depth=routing_frozen)
+                            force_full_depth=routing_frozen,
+                            semantic=sem, word_index=widx)
                 enc_r, dec_r = out.encoder_router, out.decoder_router
                 c_tok = enc_r.complexity[0].float().cpu().numpy()[: len(enc.ids)]
                 c_frame = dec_r.complexity[0].float().cpu().numpy()

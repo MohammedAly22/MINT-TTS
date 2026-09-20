@@ -1,0 +1,33 @@
+# =============================================================================
+# CONTROL: the quality ceiling. No routing at all -- every token takes every
+# step, which is an ordinary 8-layer encoder.
+#
+#   python scripts/train.py --config configs/egyptian_dense.yaml
+#
+# Two things this settles:
+#
+#   1. The quality ceiling. If the adaptive run matches this MCD while using
+#      less computation, the saving is real. If it does not, the routing is
+#      costing quality and the trade-off has to be stated honestly rather
+#      than reported as a free win.
+#
+#   2. Whether the homograph behaviour needs routing at all. A dense model
+#      with MARBERT features may well separate the readings perfectly well --
+#      in which case the contribution is the *compute allocation*, not the
+#      disambiguation, and the write-up should say so.
+#
+# The semantic path stays ON, so this isolates routing and nothing else.
+# =============================================================================
+
+_base_: egyptian_homograph.yaml
+
+model:
+  encoder:
+    routing: fixed
+
+loss:
+  compute:
+    enabled: false
+
+log:
+  run_name: egyptian_dense

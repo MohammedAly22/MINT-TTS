@@ -12,3 +12,16 @@ pyflakes>=3.0              # lint
 plotly>=6.1.1
 kaleido>=1.0
 pillow>=10.0
+
+# Egyptian Arabic experiment (configs/egyptian_*.yaml).
+#   transformers -- the frozen MARBERTv2 that supplies contextual word vectors.
+#     Required to PREPROCESS and to SYNTHESISE with semantics enabled; the
+#     training loop itself never touches it, because the vectors are cached.
+#   datasets / librosa -- scripts/prepare_egyptian.py only (corpus download).
+#   arabic-reshaper + python-bidi -- correct Arabic rendering in matplotlib
+#     figures. Without them the heatmap labels appear reversed and unjoined.
+transformers>=4.40
+datasets>=2.18
+librosa>=0.10
+arabic-reshaper>=3.0
+python-bidi>=0.4

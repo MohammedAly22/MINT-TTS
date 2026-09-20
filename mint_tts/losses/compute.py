@@ -63,6 +63,14 @@ class ComputeLoss(nn.Module):
         self.target_weight = float(c.get("target_weight", 0.0))
         self.diversity_weight = float(c.get("diversity_weight", 0.0))
         self.c_star_weight = float(c.get("c_star_weight", 0.0))
+        # Difficulty-aware allocation. `difficulty_relief` is the fraction of
+        # the compute penalty that is waived on a maximally difficult token.
+        # At 0.8 an ambiguous word pays only 20% of the per-step price an
+        # ordinary word pays, so the router can afford to think about it
+        # while still being pushed to rush the easy ones.
+        self.difficulty_relief = float(c.get("difficulty_relief", 0.0))
+        self.difficulty_contrast_weight = float(c.get("difficulty_contrast_weight", 0.0))
+        self.difficulty_margin = float(c.get("difficulty_margin", 0.15))
 
     def lambda_at(self, step: int) -> float:
         if step < self.warmup_steps:
@@ -82,15 +90,57 @@ class ComputeLoss(nn.Module):
         n = max(router.halting_probs.size(1), 1)
         return router.per_utterance_ponder() / n
 
+    @staticmethod
+    def _token_norm_ponder(router) -> torch.Tensor:
+        """Per-TOKEN normalised ponder, (B, T). Needed for a per-token price."""
+        n = max(router.halting_probs.size(1), 1)
+        return router.ponder / n
+
+    def _difficulty_weighted(self, router, difficulty: torch.Tensor) -> tuple:
+        """Per-utterance compute, with each token priced by its difficulty.
+
+        A uniform penalty asks the router to make *every* token cheap, which
+        is the wrong objective: the claim is not that all computation is
+        wasteful, it is that computation should go where the difficulty is.
+        Scaling the per-token price by (1 - relief * difficulty) states that
+        directly -- an ambiguous token is cheap to think about, an easy one is
+        expensive.
+        """
+        m = router.mask.to(difficulty.dtype)
+        d = difficulty.to(m.dtype) * m
+        price = 1.0 - self.difficulty_relief * d.clamp(0.0, 1.0)
+        tok = self._token_norm_ponder(router).to(m.dtype)
+        weighted = (tok * price * m).sum(1) / m.sum(1).clamp_min(1.0)
+
+        # Diagnostic: the depth actually spent on hard vs easy tokens. This is
+        # the number that says whether allocation is happening at all.
+        hard = (d > 0.5).to(m.dtype) * m
+        easy = ((d <= 0.5).to(m.dtype)) * m
+        hard_depth = (tok * hard).sum() / hard.sum().clamp_min(1.0)
+        easy_depth = (tok * easy).sum() / easy.sum().clamp_min(1.0)
+        return weighted, hard_depth, easy_depth, hard.sum()
+
     def forward(self, out, budget: torch.Tensor | None, step: int,
-                c_star: torch.Tensor | None = None) -> tuple[torch.Tensor, dict]:
+                c_star: torch.Tensor | None = None,
+                difficulty: torch.Tensor | None = None) -> tuple[torch.Tensor, dict]:
         device = out.mel.device
         logs: dict[str, torch.Tensor] = {}
         zero = torch.zeros((), device=device)
         if not self.enabled:
             return zero, logs
 
-        c_enc = self._norm_ponder(out.encoder_router)
+        use_difficulty = difficulty is not None and self.difficulty_relief > 0
+        if use_difficulty:
+            c_enc, hard_d, easy_d, n_hard = self._difficulty_weighted(
+                out.encoder_router, difficulty)
+            logs["compute/hard_token_depth"] = hard_d.detach()
+            logs["compute/easy_token_depth"] = easy_d.detach()
+            # THE number for this project: positive means ambiguous tokens are
+            # getting more computation than ordinary ones.
+            logs["compute/difficulty_contrast"] = (hard_d - easy_d).detach()
+            logs["compute/n_hard_tokens"] = n_hard.detach()
+        else:
+            c_enc = self._norm_ponder(out.encoder_router)
         c_dec = self._norm_ponder(out.decoder_router)
         w_sum = self.encoder_weight + self.decoder_weight
         c = (self.encoder_weight * c_enc + self.decoder_weight * c_dec) / max(w_sum, 1e-6)
@@ -121,6 +171,17 @@ class ComputeLoss(nn.Module):
 
         if self.target_compute is not None and self.target_weight > 0:
             penalty = penalty + self.target_weight * ((c.mean() - float(self.target_compute)) ** 2)
+
+        if use_difficulty and self.difficulty_contrast_weight > 0:
+            # An explicit hinge: ask for hard tokens to run at least `margin`
+            # deeper than easy ones. The relief term above makes depth on hard
+            # tokens *affordable*; this makes it *required*, which matters
+            # because a router can otherwise satisfy the relief term by simply
+            # being uniformly shallow.
+            gap = hard_d - easy_d
+            penalty = penalty + self.difficulty_contrast_weight * F.relu(
+                self.difficulty_margin - gap
+            )
 
         if self.diversity_weight > 0:
             # discourage a constant policy: reward spread of per-token depth

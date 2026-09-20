@@ -132,5 +132,8 @@ def test_gradients_flow_through_router():
     mask = lengths_to_mask(torch.tensor([6, 6]), 6)
     out = stack(x, mask, budget=torch.tensor([[0.5, 1.0]] * 2))
     (out.output.sum() + out.ponder.sum()).backward()
-    grad = stack.router.net[1].weight.grad
+    # Find the first Linear rather than indexing a fixed position: the router
+    # gained an optional context input, which moved the layers around.
+    first_linear = next(m for m in stack.router.net if isinstance(m, torch.nn.Linear))
+    grad = first_linear.weight.grad
     assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0

@@ -131,8 +131,9 @@ class Trainer:
 
         self.mcd_chance = self._measure_mcd_chance()
         self._check_figure_export()
-        self.probe = ComplexityProbe(cfg, self.tp, self.device)
-        self.homograph = HomographProbe(cfg, self.tp, self.device)
+        self.semantic_provider = self._build_semantic_provider()
+        self.probe = ComplexityProbe(cfg, self.tp, self.device, self.semantic_provider)
+        self.homograph = HomographProbe(cfg, self.tp, self.device, self.semantic_provider)
         self.asr = ASRScorer(cfg.eval.get("asr_backend", "none"), device="cpu")
         self.mos = MOSPredictor(cfg.eval.get("mos_backend", "proxy"), device="cpu")
 
@@ -147,6 +148,63 @@ class Trainer:
             self.log.info(f"Resumed from {resume} at step {self.step}")
 
         self._log_model_summary()
+
+    def _build_semantic_provider(self):
+        """A callable Encoded -> (semantic (1,W,H), word_index (1,T)).
+
+        The probes synthesise sentences that are not in the corpus, so their
+        language-model vectors cannot come from the preprocessing cache. This
+        loads the LM once, on CPU by default, and is used only every
+        `probe_every` steps -- never in the training loop.
+
+        If the model was built without semantics this returns None, and the
+        probes run exactly as they did before.
+        """
+        if not getattr(self.model, "use_semantic", False):
+            return None
+        sem_cfg = self.cfg.model.get("semantic", {}) or {}
+        try:
+            from ..modules.semantic import SemanticEncoder
+
+            device = sem_cfg.get("probe_device", "cpu")
+            enc = SemanticEncoder(
+                sem_cfg.get("model", "marbert"),
+                layer=int(sem_cfg.get("layer", -1)),
+                device=device,
+            )
+        except Exception as exc:
+            # Losing the probe is bad but not fatal; losing training would be.
+            self.log.warning(
+                "Semantic encoder unavailable for the probes (%s). The model "
+                "still trains on the cached features, but probe sentences will "
+                "be synthesised with ZERO semantics and their homograph "
+                "numbers will be meaningless. Install `transformers` to fix.",
+                exc,
+            )
+            return None
+
+        expected = int(self.model.semantic_hidden_size)
+        if enc.hidden_size != expected:
+            self.log.warning(
+                "Semantic model %s has hidden size %d but the model expects "
+                "%d; probes will run without semantics.",
+                enc.model_name, enc.hidden_size, expected,
+            )
+            return None
+
+        device = self.device
+
+        def provider(encoded):
+            feats = enc.encode(encoded.words)
+            sem = torch.from_numpy(feats.vectors).float().unsqueeze(0).to(device)
+            if sem.shape[1] == 0:      # no words survived normalisation
+                sem = torch.zeros(1, 1, enc.hidden_size, device=device)
+            widx = torch.tensor(encoded.word_ids, dtype=torch.long, device=device)
+            widx = widx.clamp(0, sem.shape[1] - 1).unsqueeze(0)
+            return sem, widx
+
+        self.log.info(f"Semantic probe encoder: {enc.model_name} (hidden {enc.hidden_size})")
+        return provider
 
     def _measure_mcd_chance(self) -> float:
         """MCD between unrelated validation utterances: the no-information level.
@@ -248,9 +306,13 @@ class Trainer:
                 speakers=batch.get("speakers"), emotions=batch.get("emotions"),
                 budget=budget, attn_prior=batch.get("attn_prior"),
                 force_full_depth=self.routing_frozen,
+                semantic=batch.get("semantic"), word_index=batch.get("word_index"),
+                reference_mel=batch.get("reference_mel"),
+                reference_lens=batch.get("reference_lens"),
             )
             recon, logs = self.loss_fn(out, batch, self.step)
-            comp, clogs = self.compute_loss(out, budget, self.step, batch.get("c_star"))
+            comp, clogs = self.compute_loss(out, budget, self.step, batch.get("c_star"),
+                                            difficulty=batch.get("difficulty"))
             loss = recon + comp
         logs.update(clogs)
         logs["loss/total"] = loss.detach()
@@ -275,6 +337,11 @@ class Trainer:
         logs.update(routing_diagnostics(out))
         logs["train/routing_frozen"] = float(self.routing_frozen)
         logs["train/lr"] = self.optimizer.param_groups[0]["lr"]
+        if out.semantic_delta_norm is not None:
+            # If this stays at 0 the semantic path never escaped its zero
+            # init, and any homograph result would be coming from somewhere
+            # else. It is the first number to check on an Arabic run.
+            logs["semantic/delta_norm"] = out.semantic_delta_norm
         logs["train/encoder_depth"] = out.encoder_router.mean_depth().detach()
         logs["train/decoder_depth"] = out.decoder_router.mean_depth().detach()
         logs["train/encoder_ponder"] = out.encoder_router.mean_ponder().detach()
@@ -306,6 +373,9 @@ class Trainer:
                 pitch=batch.get("pitch"), energy=batch.get("energy"),
                 speakers=batch.get("speakers"), emotions=batch.get("emotions"),
                 budget=budget, attn_prior=batch.get("attn_prior"),
+                semantic=batch.get("semantic"), word_index=batch.get("word_index"),
+                reference_mel=batch.get("reference_mel"),
+                reference_lens=batch.get("reference_lens"),
             )
             loss, logs = self.loss_fn(out, batch, self.step)
             comp, clogs = self.compute_loss(out, budget, self.step)

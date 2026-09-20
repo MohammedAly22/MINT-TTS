@@ -121,26 +121,53 @@ class BudgetEncoder(nn.Module):
 
 
 class ComplexityRouter(nn.Module):
-    """Predicts a per-token halting probability from the current state."""
+    """Predicts a per-token halting probability from the current state.
 
-    def __init__(self, d_model: int, hidden: int = 0, init_bias: float = -1.0, dropout: float = 0.0):
+    ``context_dim`` adds a second input: a per-token vector that does not
+    change across steps, currently the projected contextual word embedding
+    from a frozen language model (see ``modules/semantic.py``). The router
+    therefore decides how long to think using *both* what it has computed so
+    far and what the word means in this sentence.
+
+    That second path is what makes homograph routing learnable at all. The
+    recurrent state alone tells the router how converged a token is, not how
+    ambiguous it is; ambiguity is a property of the word in its context, which
+    is exactly what the LM vector encodes.
+    """
+
+    def __init__(self, d_model: int, hidden: int = 0, init_bias: float = -1.0,
+                 dropout: float = 0.0, context_dim: int = 0):
         super().__init__()
         hidden = hidden or d_model // 2
+        self.context_dim = int(context_dim)
+        self.norm = nn.LayerNorm(d_model)
+        in_dim = d_model + self.context_dim
         self.net = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, hidden),
+            nn.Linear(in_dim, hidden),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden, 1),
         )
         nn.init.zeros_(self.net[-1].weight)
         nn.init.constant_(self.net[-1].bias, init_bias)
+        if self.context_dim:
+            # Zero-init the context slice so the router starts as the
+            # state-only router and learns to use semantics, rather than
+            # being perturbed by it at initialisation.
+            with torch.no_grad():
+                self.net[0].weight[:, d_model:].zero_()
 
-    def forward(self, x: torch.Tensor, film=None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, film=None, context: torch.Tensor | None = None
+                ) -> torch.Tensor:
         if film is not None and film[0] is not None:
             gamma, beta = film
             x = x * (1.0 + gamma) + beta
-        return self.net(x).squeeze(-1)  # (B, T) logits
+        h = self.norm(x)
+        if self.context_dim:
+            if context is None:
+                context = h.new_zeros(*h.shape[:-1], self.context_dim)
+            h = torch.cat([h, context.to(h.dtype)], dim=-1)
+        return self.net(h).squeeze(-1)  # (B, T) logits
 
 
 class AdaptiveStack(nn.Module):
@@ -164,6 +191,7 @@ class AdaptiveStack(nn.Module):
         budget_conditioning: bool = True,
         n_budget: int = 2,
         activation: str = "gelu",
+        router_context_dim: int = 0,
     ):
         super().__init__()
         if routing not in ROUTING_MODES:
@@ -188,8 +216,10 @@ class AdaptiveStack(nn.Module):
         self.step_emb = nn.Embedding(self.max_steps, d_model) if step_embedding else None
         if self.step_emb is not None:
             nn.init.normal_(self.step_emb.weight, std=0.02)
+        self.router_context_dim = int(router_context_dim)
         self.router = (
-            ComplexityRouter(d_model, router_hidden, router_init_bias)
+            ComplexityRouter(d_model, router_hidden, router_init_bias,
+                             context_dim=self.router_context_dim)
             if routing != "fixed"
             else None
         )
@@ -223,8 +253,14 @@ class AdaptiveStack(nn.Module):
         hard: bool = False,
         max_steps_override: int | None = None,
         force_full_depth: bool = False,
+        router_context: torch.Tensor | None = None,
     ) -> RouterOutput:
         """x: (B, T, D); mask: (B, T) bool (True = real token).
+
+        ``router_context`` is an optional (B, T, C) per-token vector fed to the
+        router alongside the recurrent state -- the projected semantic
+        features. It is constant across steps, so it is gathered once per step
+        in the hard path rather than recomputed.
 
         `force_full_depth` runs the stack as if `routing: fixed`, without
         touching the router's parameters. The trainer uses it during the
@@ -236,8 +272,8 @@ class AdaptiveStack(nn.Module):
         if force_full_depth or self.routing == "fixed":
             return self._forward_full(x, mask)
         if hard:
-            return self._forward_hard(x, mask, budget, max_steps_override)
-        return self._forward_soft(x, mask, budget, max_steps_override)
+            return self._forward_hard(x, mask, budget, max_steps_override, router_context)
+        return self._forward_soft(x, mask, budget, max_steps_override, router_context)
 
     def _forward_full(self, x, mask):
         """Every position takes every step; the router is not consulted."""
@@ -267,7 +303,7 @@ class AdaptiveStack(nn.Module):
         )
 
     # -- soft (differentiable) path ---------------------------------------
-    def _forward_soft(self, x, mask, budget, max_steps_override):
+    def _forward_soft(self, x, mask, budget, max_steps_override, router_context=None):
         B, T, D = x.shape
         device, dtype = x.device, x.dtype
         N = int(max_steps_override or self.max_steps)
@@ -295,7 +331,7 @@ class AdaptiveStack(nn.Module):
             if self.routing == "fixed" or forced:
                 p = torch.ones(B, T, device=device, dtype=dtype)
             else:
-                logits = self.router(state, film)
+                logits = self.router(state, film, router_context)
                 if bias is not None:
                     logits = logits + bias.squeeze(-1)
                 if self.routing == "sentence":
@@ -385,7 +421,7 @@ class AdaptiveStack(nn.Module):
 
     # -- hard (gathered) path: real FLOP savings --------------------------
     @torch.no_grad()
-    def _forward_hard(self, x, mask, budget, max_steps_override):
+    def _forward_hard(self, x, mask, budget, max_steps_override, router_context=None):
         B, T, D = x.shape
         device, dtype = x.device, x.dtype
         N = int(max_steps_override or self.max_steps)
@@ -436,7 +472,14 @@ class AdaptiveStack(nn.Module):
             if forced:
                 p_a = torch.ones(B, A, device=device, dtype=dtype)
             else:
-                logits = self.router(x_a_in, film)
+                # The context is per-position and constant across steps, so it
+                # is gathered to the active subset exactly like the state.
+                ctx_a = None
+                if router_context is not None:
+                    c_idx = active_index.clamp(max=T - 1).unsqueeze(-1).expand(
+                        -1, -1, router_context.size(-1))
+                    ctx_a = router_context.gather(1, c_idx)
+                logits = self.router(x_a_in, film, ctx_a)
                 if bias is not None:
                     logits = logits + bias.squeeze(-1)
                 if self.routing == "sentence":
@@ -505,7 +548,8 @@ class AdaptiveStack(nn.Module):
         )
 
 
-def build_stack(cfg, d_model: int, routing: str | None = None) -> AdaptiveStack:
+def build_stack(cfg, d_model: int, routing: str | None = None,
+                router_context_dim: int = 0) -> AdaptiveStack:
     """Build an AdaptiveStack from a config section."""
     return AdaptiveStack(
         d_model=d_model,
@@ -524,4 +568,5 @@ def build_stack(cfg, d_model: int, routing: str | None = None) -> AdaptiveStack:
         budget_conditioning=cfg.get("budget_conditioning", True),
         n_budget=cfg.get("n_budget", 2),
         activation=cfg.get("activation", "gelu"),
+        router_context_dim=router_context_dim,
     )

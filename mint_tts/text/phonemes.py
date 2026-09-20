@@ -27,7 +27,16 @@ import re
 import warnings
 from functools import lru_cache
 
-WORD_RE = re.compile(r"[a-zA-Z']+")
+# Word tokenisation must be script-agnostic: the Latin-only pattern this
+# started as reduced any Arabic sentence to zero words, which silently
+# produced empty token sequences rather than an error. Arabic letters,
+# Latin letters and digits all count as word characters so that
+# code-switched Egyptian ("laptop", "online") survives the frontend.
+_ARABIC_BLOCK = "ء-غف-يٱ-ۓ"
+WORD_RE = re.compile(f"[a-zA-Z'{_ARABIC_BLOCK}0-9]+")
+
+# The original Latin-only pattern, kept for the English frontends' tests.
+LATIN_WORD_RE = re.compile(r"[a-zA-Z']+")
 
 
 class PhonemizerBase:
@@ -154,6 +163,30 @@ class ArpabetPhonemizer(PhonemizerBase):
         return [self._clean([p for p in self._g2p(w) if p != " "]) or list(w) for w in words]
 
 
+class ArabicCharPhonemizer(PhonemizerBase):
+    """Identity frontend over Arabic graphemes.
+
+    There is deliberately no Arabic G2P here. Every available Arabic
+    grapheme-to-phoneme tool needs diacritics to decide short vowels, so
+    running one on undiacritised Egyptian text would make the tool guess --
+    and it would guess *context-free*, resolving the ambiguity to a single
+    reading before the model ever saw it. That is precisely the failure the
+    English `ipa` frontend already demonstrated: espeak pre-resolved the
+    homographs, the encoder had nothing left to disambiguate, and routing
+    measured nothing.
+
+    Keeping the graphemes intact means the short vowels are genuinely absent
+    from the input, so the model must recover them from context. That is the
+    experiment.
+    """
+
+    name = "ar_char"
+    is_phonetic = False
+
+    def phonemize_words(self, words, text=None):
+        return [list(w) for w in words]
+
+
 @lru_cache(maxsize=1)
 def _bind_espeak_library() -> bool:
     """Point `phonemizer` at the pip-installed espeak-ng, if present."""
@@ -185,15 +218,20 @@ def _ensure_nltk_data() -> None:
         pass
 
 
-BACKENDS = {"char": CharPhonemizer, "ipa": EspeakPhonemizer, "arpabet": ArpabetPhonemizer}
+BACKENDS = {"char": CharPhonemizer, "ipa": EspeakPhonemizer,
+            "arpabet": ArpabetPhonemizer, "ar_char": ArabicCharPhonemizer}
+
+# Frontends that need no optional dependency and therefore can never
+# silently degrade to something else.
+PASSTHROUGH_BACKENDS = ("char", "ar_char")
 
 
 def build_phonemizer(name: str, **kwargs) -> PhonemizerBase:
     """Build a backend, degrading to characters with a loud warning."""
     if name not in BACKENDS:
         raise ValueError(f"Unknown phonemizer '{name}'. Options: {sorted(BACKENDS)}")
-    if name == "char":
-        return CharPhonemizer()
+    if name in PASSTHROUGH_BACKENDS:
+        return BACKENDS[name]()
     try:
         return BACKENDS[name](**kwargs)
     except Exception as exc:

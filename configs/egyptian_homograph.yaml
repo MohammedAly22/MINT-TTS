@@ -1,0 +1,217 @@
+# =============================================================================
+# THE Egyptian Arabic experiment.
+#
+#   python scripts/prepare_egyptian.py --out data/egyptian
+#   python scripts/preprocess.py --config configs/egyptian_homograph.yaml --workers 8
+#   python scripts/train.py      --config configs/egyptian_homograph.yaml
+#
+# The question: on undiacritised Egyptian Arabic, does the model spend more
+# computation on genuinely ambiguous words -- and does spending it change the
+# pronunciation in the right direction?
+#
+# Three things make that question answerable here and not on LJSpeech:
+#
+#   1. `ar_char` input. The short vowels are simply absent from the text, so
+#      the ambiguity is real rather than an artefact of a phonemiser's
+#      choices. On the English `ipa` runs espeak had already resolved every
+#      homograph, and the encoder measured nothing -- that null result is why
+#      the frontend matters this much.
+#
+#   2. Frozen MARBERTv2 features. Character statistics over 68 hours cannot
+#      recover lexical semantics; a dialect-pretrained LM already has them.
+#      The router reads those features directly, so "which reading is this"
+#      and "how much compute does it need" are answered by different parts of
+#      the system.
+#
+#   3. A difficulty-aware compute penalty. A uniform penalty asks the router
+#      to make every token cheap, which is the wrong objective. Here an
+#      ambiguous token pays a quarter of the per-step price, so depth on the
+#      hard words is affordable while the easy ones stay under pressure.
+#
+# Sized for an H200 (140 GB). See `egyptian_homograph_small.yaml` for a
+# version that fits a 24 GB card.
+# =============================================================================
+
+_base_: [base.yaml, dataset_egyptian.yaml]
+
+seed: 1234
+
+model:
+  d_model: 512
+  dropout: 0.1
+  n_speakers: 1
+  n_emotions: 1
+  # Room for other languages later without re-shaping the embedding table.
+  # 1 keeps the module absent entirely for this run.
+  n_languages: 1
+
+  # -- contextual semantics: the homograph path ---------------------------
+  semantic:
+    enabled: true
+    model: marbert             # UBC-NLP/MARBERTv2 -- dialectal, not MSA-only
+    layer: -1                  # last layer; -5 is often more lexical, worth an ablation
+    hidden_size: 768
+    proj_hidden: 512
+    dropout: 0.1
+    use_film: true
+    to_router: true            # the router sees semantics directly
+    # Cache the LM output during preprocessing. With this on, training never
+    # runs BERT: a 163M-parameter forward pass per step would otherwise
+    # dominate a ~60M-parameter acoustic model.
+    precompute: true
+    device: auto               # for the one-off preprocessing pass
+    probe_device: cpu          # probes run every probe_every steps only
+
+  # -- zero-shot voice cloning, wired now, inert on one speaker -----------
+  reference_encoder:
+    enabled: true
+    hidden: 256
+    n_layers: 4
+    dropout: 0.1
+    reference_frames: 256      # ~2.7 s of reference audio
+    speaker_dropout: 0.1       # keeps synthesis-without-a-reference working
+    same_speaker: true
+
+  encoder:
+    routing: token             # per-token depth: the whole point
+    max_steps: 8
+    min_steps: 1
+    share_weights: true        # depth costs no parameters
+    n_heads: 8
+    ff_dim: 2048
+    ffn_type: linear
+    dropout: 0.1
+    router_hidden: 256
+    router_init_bias: -1.0
+    step_embedding: true
+    budget_conditioning: true
+
+  decoder:
+    # Deliberately FIXED for this first run. The decoder is ~75% of the
+    # FLOPs, so routing it would dominate every compute number and make the
+    # encoder's allocation -- the thing being measured -- impossible to read.
+    # `egyptian_homograph_unified.yaml` turns it on once the encoder result
+    # is established.
+    routing: fixed
+    max_steps: 6
+    n_heads: 8
+    ff_dim: 2048
+
+  variance:
+    use_pitch: true
+    use_energy: true
+    hidden: 256
+    layers: 2
+    kernel: 3
+    dropout: 0.5
+    n_bins: 256
+
+loss:
+  mel: 1.0
+  mel_post: 1.0
+  duration: 1.0
+  pitch: 0.1
+  energy: 0.1
+  forwardsum: 1.0
+  bin: 1.0
+  bin_start_step: 6000
+  bin_warmup_steps: 6000
+
+  compute:
+    enabled: true
+    lambda_max: 0.05
+    lambda_floor: 0.02
+    # Alignment must be solid before any compute pressure arrives. On this
+    # corpus (noisier than LJSpeech, machine transcripts) that takes longer,
+    # so the warmup is generous. Watch align/entropy_ratio: if it has not
+    # fallen well below 0.3 by here, raise this rather than pressing on.
+    warmup_steps: 12000
+    router_start_step: null    # follows warmup_steps
+    ramp_steps: 8000
+    q_exponent: 1.0
+    q_range: [0.0, 1.0]
+    h_range: [0.3, 1.0]
+    use_hardware_cap: true
+    hardware_weight: 0.5
+    encoder_weight: 1.0
+    decoder_weight: 1.0
+
+    # -- difficulty-aware allocation -----------------------------------
+    # A maximally ambiguous token pays 1 - 0.75 = 25% of the per-step price
+    # an ordinary token pays.
+    difficulty_relief: 0.75
+    # And a hinge that *requires* a gap, because the relief term alone can be
+    # satisfied by a uniformly shallow router.
+    difficulty_contrast_weight: 0.05
+    difficulty_margin: 0.15
+
+    diversity_weight: 0.0
+    c_star_weight: 0.0
+
+train:
+  output_dir: runs
+  device: auto
+  # H200: 140 GB. At d_model 512 / 1800 max frames this leaves plenty of
+  # headroom; drop to 32 if you raise max_frames or d_model.
+  batch_size: 64
+  eval_batch_size: 16
+  num_workers: 8
+  pin_memory: true
+  max_steps: 300000
+  lr: 6.0e-4
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  weight_decay: 0.01
+  grad_clip: 1.0
+  grad_accum: 1
+  amp: true
+  # bf16 on Hopper: no loss scaling, no inf/nan skipped steps, and the
+  # forward-sum loss is numerically happier than it is under fp16.
+  bf16: true
+  use_ema: true
+  ema_decay: 0.9995
+  eval_with_ema: true
+  val_every: 2000
+  val_batches: 10
+  save_every: 5000
+  keep_checkpoints: 3
+  scheduler:
+    name: cosine
+    warmup_steps: 6000
+    min_lr_ratio: 0.05
+
+eval:
+  asr_backend: none          # set to whisper for Arabic CER once training settles
+  mos_backend: proxy
+  quality_budget: 0.9
+  n_audio_eval: 2
+
+vocoder:
+  # Griffin-Lim is the zero-download default and sounds rough. Any judgement
+  # by ear needs a real 24 kHz vocoder -- see the notebook for fetching one.
+  name: griffin_lim
+  griffin_lim_iters: 32
+
+log:
+  run_name: egyptian_homograph
+  backends: [tensorboard]
+  log_every: 50
+  figure_every: 2000
+  probe_every: 2000
+  figure_backend: matplotlib
+  n_figure_examples: 2
+  log_audio: true
+  probe_audio: true
+  probe_hard_routing: true
+  probe_budgets: [0.2, 0.5, 0.9]
+  probe_max_figures: 6
+  probe_max_audio: 16
+
+  # Built-in Egyptian sets, generated from text/homographs_ar.py so the probe
+  # sentences and the difficulty lexicon cannot drift apart.
+  probe_set: arabic
+  homograph_set: arabic
+  homograph_probe: true
+  homograph_audio: true
+  homograph_max_audio: 8
+  homograph_quality: 0.9

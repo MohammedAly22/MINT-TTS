@@ -1,0 +1,39 @@
+# =============================================================================
+# The same experiment, sized for a 24 GB card (4090 / A10 / L4) or a Colab
+# A100 rather than an H200.
+#
+#   python scripts/train.py --config configs/egyptian_homograph_small.yaml
+#
+# The model is narrower and the batch smaller, so results will be weaker in
+# absolute quality -- but every diagnostic the experiment turns on
+# (difficulty_contrast, divergence_ratio, depth_spread) is a *relative*
+# measure and stays meaningful at this scale.
+# =============================================================================
+
+_base_: egyptian_homograph.yaml
+
+model:
+  d_model: 384
+  encoder:
+    n_heads: 6
+    ff_dim: 1536
+    max_steps: 8
+  decoder:
+    n_heads: 6
+    ff_dim: 1536
+  semantic:
+    proj_hidden: 384
+
+data:
+  max_frames: 1200          # drops the longest clips to fit the memory budget
+
+train:
+  batch_size: 16
+  grad_accum: 2             # keeps the effective batch at 32
+  num_workers: 4
+  lr: 4.0e-4
+  bf16: false               # pre-Hopper cards: fp16 + loss scaling
+  amp: true
+
+log:
+  run_name: egyptian_homograph_small
