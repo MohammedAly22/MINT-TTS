@@ -110,6 +110,30 @@ def _unit(x: np.ndarray) -> np.ndarray:
     return x / np.maximum(n, 1e-8)
 
 
+def _centre(x: np.ndarray) -> np.ndarray:
+    """Subtract the mean vector before comparing -- removes anisotropy.
+
+    Language-model embeddings are strongly anisotropic: every vector sits in
+    a narrow cone, so raw cosine between any two of them is ~0.95-0.99.
+    Measured on MARBERTv2's last layer, two completely UNRELATED Arabic words
+    score 0.979 -- the same as the two readings of a homograph. Any spread or
+    separation computed on the raw vectors is then dominated by that shared
+    mean direction rather than by what distinguishes the occurrences.
+
+    Subtracting the per-word mean removes the cone and leaves the differences
+    the measurement is actually about. On the same data this turns a +0.011
+    raw margin into a clean split (+0.135 within-reading vs -0.295 across).
+
+    Applied only to the context (language-model) side. Acoustic descriptors
+    are mel statistics, which are not anisotropic in this way, and centring
+    them would discard the overall spectral level that legitimately
+    distinguishes two pronunciations.
+    """
+    if len(x) < 2:
+        return x
+    return x - x.mean(0, keepdims=True)
+
+
 def _mean_pairwise_distance(x: np.ndarray, max_pairs: int = 400,
                             rng: np.random.Generator | None = None) -> float:
     """Average cosine distance between occurrences: the spread of a cluster."""
@@ -176,7 +200,7 @@ def _predictivity(context: np.ndarray, labels: np.ndarray,
     """
     if len(context) < 4 or len(set(labels.tolist())) < 2:
         return 0.0
-    u = _unit(context)
+    u = _unit(_centre(context))
     majority = max((labels == c).mean() for c in (0, 1))
     correct = 0
     for i in range(len(u)):
@@ -382,9 +406,13 @@ class ContextualAmbiguity:
     once durations exist.
     """
 
-    def __init__(self, min_count: int = 6, max_occurrences: int = 40, seed: int = 0):
+    def __init__(self, min_count: int = 6, max_occurrences: int = 40,
+                 separation_scale: float = 0.6, seed: int = 0):
         self.min_count = int(min_count)
         self.max_occurrences = int(max_occurrences)
+        # Centred LM vectors separate further than mel descriptors do, so the
+        # saturation point is higher here than in the acoustic miner.
+        self.separation_scale = float(separation_scale)
         self.rng = np.random.default_rng(seed)
         self._context: dict[str, list[np.ndarray]] = defaultdict(list)
         self._counts: dict[str, int] = defaultdict(int)
@@ -395,21 +423,84 @@ class ContextualAmbiguity:
             self._context[word].append(np.asarray(context, dtype=np.float32))
 
     def finalise(self) -> dict[str, WordStats]:
+        """Score by how much better the split is than one on shuffled data.
+
+        Two earlier attempts were both wrong, and the reason is worth keeping
+        because it is easy to walk into again:
+
+        *Spread above the corpus median* conflated "two clean senses" with
+        "diffuse noise" -- both are large spreads -- and needed hundreds of
+        word types before the median meant anything.
+
+        *Raw cluster separation* is worse, and fails silently. In 768
+        dimensions random points are nearly orthogonal, so after centring,
+        2-means finds a separation of ~1.999 on a single structureless
+        Gaussian blob, at every sample size tested up to n=80. Separation
+        alone measures the dimensionality, not the structure.
+
+        So the split is scored against its own null: the same clustering run
+        on the same vectors with their dimensions independently shuffled,
+        which destroys any real covariance while preserving the marginals.
+        A word with two genuine senses beats that null; a word with one sense
+        does not.
+
+        This remains the weaker of the two measurements, and it is a
+        bootstrap: `AmbiguityMiner` supersedes it as soon as the aligner can
+        supply acoustic evidence, which is the thing actually being claimed.
+        """
         out: dict[str, WordStats] = {}
-        spreads: list[float] = []
         for word, vecs in self._context.items():
             if len(vecs) < self.min_count:
                 continue
-            spread = _mean_pairwise_distance(np.stack(vecs), rng=self.rng)
-            spreads.append(spread)
-            out[word] = WordStats(word=word, count=self._counts[word],
-                                  context_predictivity=spread)
-        if not out:
-            return out
-        median = float(np.median(spreads)) or 1e-6
-        for st in out.values():
-            # Same normalisation as the acoustic path: relative to the corpus.
-            rel = st.context_predictivity / median
-            st.acoustic_spread = 0.0
-            st.ambiguity = float(np.clip(rel - 1.0, 0.0, 1.0))
+            x = _centre(np.stack(vecs))
+            labels, separation = _two_means(x, rng=self.rng)
+
+            # Within-cluster tightness relative to the null: how much of the
+            # variance the split actually explains.
+            observed = _split_quality(x, labels)
+            null = float(np.mean([
+                _split_quality(*_shuffled_split(x, self.rng)) for _ in range(8)
+            ]))
+            gain = max(0.0, observed - null) / max(1.0 - null, 1e-6)
+
+            if len(set(labels.tolist())) < 2:
+                balance = 0.0
+            else:
+                minority = min((labels == c).mean() for c in (0, 1))
+                balance = float(minority / 0.5)
+
+            st = WordStats(word=word, count=self._counts[word],
+                           separation=separation)
+            st.n_clusters = 2 if gain > 0.1 else 1
+            st.context_predictivity = gain
+            st.ambiguity = float(np.clip(gain, 0.0, 1.0) * balance)
+            out[word] = st
         return out
+
+
+def _split_quality(x: np.ndarray, labels: np.ndarray) -> float:
+    """Fraction of total variance explained by a two-way split (0-1)."""
+    if len(set(labels.tolist())) < 2:
+        return 0.0
+    total = float(((x - x.mean(0)) ** 2).sum())
+    if total <= 0:
+        return 0.0
+    within = 0.0
+    for c in (0, 1):
+        sel = labels == c
+        if sel.any():
+            within += float(((x[sel] - x[sel].mean(0)) ** 2).sum())
+    return float(np.clip(1.0 - within / total, 0.0, 1.0))
+
+
+def _shuffled_split(x: np.ndarray, rng: np.random.Generator):
+    """The same clustering on dimension-shuffled data: the null hypothesis.
+
+    Shuffling each dimension independently keeps every marginal distribution
+    intact while destroying the covariance that a real sense distinction
+    would create. Whatever separation 2-means finds here is an artefact of
+    dimensionality and sample size, and is exactly what must be subtracted.
+    """
+    y = np.stack([rng.permutation(col) for col in x.T], axis=1)
+    labels, _ = _two_means(y, rng=rng)
+    return y, labels

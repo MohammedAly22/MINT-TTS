@@ -54,7 +54,21 @@ model:
   semantic:
     enabled: true
     model: marbert             # UBC-NLP/MARBERTv2 -- dialectal, not MSA-only
-    layer: -1                  # last layer; -5 is often more lexical, worth an ablation
+    # Layer -3, not -1. Measured on the flag/science readings of `علم`
+    # (6 sentences each), separation between the two readings:
+    #
+    #   layer  within  across  margin   unrelated-word baseline
+    #     -1    0.991   0.980  +0.011   0.979   <- saturated, unusable as-is
+    #     -3    0.743   0.409  +0.334   0.356   <- 30x the margin
+    #
+    # The last layer is strongly anisotropic: every vector sits in a narrow
+    # cone, so two UNRELATED words also score 0.979. A classifier can still
+    # separate the readings there (leave-one-out accuracy 0.92 at every
+    # layer, vs 0.44 shuffled), so the signal exists -- but the adapter
+    # learns a linear projection, and a space with real spread conditions
+    # that far better. Middle layers carry lexical semantics; the top layer
+    # specialises toward the masked-LM objective.
+    layer: -3
     hidden_size: 768
     proj_hidden: 512
     dropout: 0.1

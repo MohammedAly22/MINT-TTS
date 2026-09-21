@@ -290,16 +290,51 @@ def test_unseen_word_scores_zero_not_an_error():
     assert AmbiguityTable.from_stats(_synthetic_corpus()).score("كلمة") == 0.0
 
 
+def _bootstrap_stats(dim=768, seed=1):
+    """Text-only bootstrap on vectors of realistic LM dimensionality."""
+    rng = np.random.default_rng(seed)
+    boot = ContextualAmbiguity(min_count=6)
+    a, b = rng.standard_normal(dim), rng.standard_normal(dim)
+    for i in range(16):
+        boot.add("two_senses", (a if i % 2 else b) + 0.5 * rng.standard_normal(dim))
+        boot.add("one_sense", a + 0.5 * rng.standard_normal(dim))
+        boot.add("pure_noise", rng.standard_normal(dim))
+    return boot.finalise()
+
+
 def test_text_only_bootstrap_runs_without_audio():
     """The pre-alignment fallback must work from LM vectors alone."""
-    rng = np.random.default_rng(1)
-    boot = ContextualAmbiguity(min_count=6)
-    a, b = rng.standard_normal(16), rng.standard_normal(16)
-    for i in range(20):
-        boot.add("shifty", (a if i % 2 else b) + 0.1 * rng.standard_normal(16))
-        boot.add("steady", a + 0.05 * rng.standard_normal(16))
-    stats = boot.finalise()
-    assert stats["shifty"].ambiguity > stats["steady"].ambiguity
+    stats = _bootstrap_stats()
+    assert stats["two_senses"].ambiguity > stats["one_sense"].ambiguity
+
+
+def test_bootstrap_rejects_structureless_vectors():
+    """The failure this guards against is subtle and was actually hit.
+
+    In 768 dimensions random points are nearly orthogonal, so after centring
+    2-means reports a separation of ~1.999 on a SINGLE structureless Gaussian
+    blob -- at every sample size tested. Scoring on separation alone therefore
+    marked every word maximally ambiguous. The score is now calibrated against
+    a dimension-shuffled null, so a blob must come out near zero.
+    """
+    stats = _bootstrap_stats()
+    assert stats["pure_noise"].ambiguity < 0.2
+    assert stats["one_sense"].ambiguity < 0.2
+
+
+def test_two_means_separation_alone_is_not_evidence():
+    """Document the artefact directly, so nobody reintroduces it.
+
+    If this ever fails -- i.e. 2-means stops splitting structureless
+    high-dimensional data -- the null calibration could be simplified.
+    """
+    from mint_tts.text.ambiguity import _centre, _two_means
+
+    rng = np.random.default_rng(0)
+    _, separation = _two_means(_centre(rng.standard_normal((20, 768))), rng=rng)
+    assert separation > 1.5, (
+        "a structureless blob still yields a large 2-means separation; "
+        "raw separation must not be used as an ambiguity score")
 
 
 # -- the semantic path -----------------------------------------------------

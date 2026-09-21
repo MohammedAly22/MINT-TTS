@@ -140,6 +140,26 @@ preprocessing and the vectors are cached to disk. Training never runs BERT: a
 acoustic model and make "fast" untrue. The cache path includes a hash of
 `(model, layer)`, so switching LM cannot silently reuse the old vectors.
 
+**Which layer.** Layer **-3**, not the last layer. Measured on the flag/science
+readings of `علم`:
+
+| layer | within-reading | across-reading | margin | unrelated-word baseline |
+|---|---|---|---|---|
+| -1 | 0.991 | 0.980 | **+0.011** | 0.979 |
+| -3 | 0.743 | 0.409 | **+0.334** | 0.356 |
+| -12 | 0.909 | 0.881 | +0.028 | 0.250 |
+
+The last layer is strongly **anisotropic**: every vector sits in a narrow cone,
+so two completely *unrelated* Arabic words also score 0.979 — the same as two
+readings of a homograph. The signal is still there (a leave-one-out classifier
+gets 0.92 at every layer, against a 0.44 shuffled control), but the adapter
+learns a linear projection and a space with real spread conditions that far
+better. Middle layers carry lexical semantics; the top layer specialises
+toward the masked-LM objective.
+
+This is also why anything comparing LM vectors **centres them first**
+(subtracts the mean): on raw vectors the shared cone dominates every distance.
+
 **Subword alignment.** MARBERT uses WordPiece, so one word becomes several
 subwords. They are mean-pooled back to whole words using the fast tokenizer's
 `word_ids()` map. Getting this wrong would shift every vector by one word and
