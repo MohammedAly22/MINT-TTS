@@ -56,7 +56,10 @@ class TTSDataset(Dataset):
         self.max_frames = d.get("max_frames", 1200)
         self.min_frames = d.get("min_frames", 32)
         self.max_tokens = d.get("max_tokens", 400)
-        self.use_prior = d.get("use_attn_prior", True)
+        # The model builds the alignment prior on the GPU from the lengths.
+        # Building it here cost seconds of CPU per batch and a ~200 MB tensor
+        # through the worker pipe; the option stays for CPU-only debugging.
+        self.use_prior = d.get("use_attn_prior", True) and d.get("prior_in_dataset", False)
         self.prior_scale = d.get("attn_prior_scaling", 1.0)
 
         sem = cfg.model.get("semantic", {}) or {}
@@ -350,11 +353,16 @@ def build_dataloader(cfg, index_path: str, train: bool = True, batch_size: int |
     ds = TTSDataset(index_path, cfg, train=train)
     bs = batch_size or (cfg.train.batch_size if train else cfg.train.get("eval_batch_size", 8))
     nw = cfg.train.get("num_workers", 2) if num_workers is None else num_workers
+    extra = {}
+    if nw > 0:
+        # Keep several batches queued per worker so a slow file read never
+        # leaves the GPU waiting; workers persist across epochs.
+        extra = {"persistent_workers": True,
+                 "prefetch_factor": int(cfg.train.get("prefetch_factor", 4))}
+    pin = bool(cfg.train.get("pin_memory", False))
     if train and cfg.data.get("bucket_by_length", True):
         sampler = LengthBucketSampler(ds.lengths, bs, shuffle=True, seed=cfg.get("seed", 1234))
         return DataLoader(ds, batch_sampler=sampler, collate_fn=collate, num_workers=nw,
-                          pin_memory=cfg.train.get("pin_memory", False),
-                          persistent_workers=nw > 0)
+                          pin_memory=pin, **extra)
     return DataLoader(ds, batch_size=bs, shuffle=train, collate_fn=collate, num_workers=nw,
-                      pin_memory=cfg.train.get("pin_memory", False),
-                      persistent_workers=nw > 0)
+                      pin_memory=pin, **extra)

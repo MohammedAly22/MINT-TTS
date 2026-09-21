@@ -21,6 +21,7 @@ from ..text.tokenizer import build_text_processor
 from ..utils.common import (
     EMA,
     device_name,
+    find_latest_checkpoint,
     gpu_memory_mb,
     load_checkpoint,
     move_to,
@@ -70,6 +71,11 @@ class Trainer:
         self.cfg = cfg
         set_seed(cfg.get("seed", 1234), cfg.train.get("deterministic", False))
         self.device = resolve_device(cfg.train.get("device", "auto"))
+        if self.device.type == "cuda":
+            # TF32 for whatever autocast leaves in fp32 (A100/H100: ~8x the
+            # fp32 matmul rate at no measurable cost to this model).
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.run_dir = Path(cfg.train.output_dir) / cfg.log.get("run_name", "run")
         self.ckpt_dir = self.run_dir / "checkpoints"
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -103,15 +109,24 @@ class Trainer:
             if not param.requires_grad:
                 continue
             (no_decay if param.ndim <= 1 or "emb" in n else decay).append(param)
+        adamw_extra = {"fused": True} if self.device.type == "cuda" else {}
         self.optimizer = torch.optim.AdamW(
             [{"params": decay, "weight_decay": p.get("weight_decay", 0.01)},
              {"params": no_decay, "weight_decay": 0.0}],
             lr=p.lr, betas=tuple(p.get("betas", [0.9, 0.98])), eps=p.get("eps", 1e-9),
+            **adamw_extra,
         )
         self.total_steps = int(p.max_steps)
         self.scheduler = build_scheduler(self.optimizer, cfg, self.total_steps)
         self.use_amp = bool(p.get("amp", False)) and self.device.type == "cuda"
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.amp_dtype = torch.bfloat16 if p.get("bf16", False) else torch.float16
+        if self.use_amp and self.amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+            self.log.warning("bf16 requested but this GPU lacks it; using fp16 + loss scaling.")
+            self.amp_dtype = torch.float16
+        # Loss scaling exists for fp16's narrow exponent. bf16 has fp32's
+        # range, and the scaler's bookkeeping costs a host sync every step.
+        self.scaler = torch.amp.GradScaler(
+            "cuda", enabled=self.use_amp and self.amp_dtype == torch.float16)
         self.ema = EMA(self.model, p.get("ema_decay", 0.999)) if p.get("use_ema", True) else None
         self.grad_accum = int(p.get("grad_accum", 1))
         # Routing stays off until the compute penalty turns on. An
@@ -141,11 +156,19 @@ class Trainer:
         self.step = 0
         self.epoch = 0
         self.best_val = float("inf")
+        if resume == "auto":
+            # Pick up wherever the run got to -- the notebook calls this
+            # unconditionally, so a fresh run and a reconnect are one command.
+            found = find_latest_checkpoint(self.ckpt_dir)
+            if found is None:
+                self.log.info(f"No checkpoint in {self.ckpt_dir}: starting from scratch.")
+            resume = str(found) if found is not None else None
         if resume:
             ckpt = load_checkpoint(resume, self.model, self.optimizer, self.scheduler,
                                    self.scaler, self.ema, map_location=self.device)
             self.step = int(ckpt.get("step", 0))
             self.epoch = int(ckpt.get("epoch", 0))
+            self.best_val = float((ckpt.get("extra") or {}).get("best_val", float("inf")))
             self.log.info(f"Resumed from {resume} at step {self.step}")
 
         self._log_model_summary()
@@ -324,7 +347,14 @@ class Trainer:
         return self.step < self.router_start_step
 
     # -- one step ---------------------------------------------------------
-    def train_step(self, batch: dict) -> dict:
+    def train_step(self, batch: dict, diagnostics: bool = True) -> dict:
+        """One optimiser step.
+
+        `diagnostics=False` skips everything that only feeds the logs
+        (alignment/routing health, FLOP accounting). Those read values back to
+        the host, and every such read stalls the CPU until the GPU drains --
+        so they run only on the steps that are actually logged.
+        """
         batch = move_to(batch, self.device)
         B = batch["tokens"].size(0)
         c = self.cfg.loss.compute
@@ -334,8 +364,8 @@ class Trainer:
             h_range=tuple(c.get("h_range", [0.3, 1.0])),
             use_hardware=bool(c.get("use_hardware_cap", True)),
         )
-        amp_dtype = torch.bfloat16 if self.cfg.train.get("bf16", False) else torch.float16
-        with torch.autocast(device_type=self.device.type, dtype=amp_dtype, enabled=self.use_amp):
+        with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype,
+                            enabled=self.use_amp):
             out = self.model(
                 batch["tokens"], batch["token_lens"], mels=batch["mel"], mel_lens=batch["mel_lens"],
                 pitch=batch.get("pitch"), energy=batch.get("energy"),
@@ -359,18 +389,23 @@ class Trainer:
             gn = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.cfg.train.get("grad_clip", 1.0))
             logs["train/grad_norm"] = gn.detach()
-            before = self.scaler.get_scale()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad(set_to_none=True)
-            # A skipped step (inf/nan under AMP) must not advance the schedule.
-            if self.scaler.get_scale() >= before:
+            if self.scaler.is_enabled():
+                before = self.scaler.get_scale()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                # A skipped step (inf/nan under fp16) must not advance the schedule.
+                if self.scaler.get_scale() >= before:
+                    self.scheduler.step()
+            else:
+                self.optimizer.step()
                 self.scheduler.step()
+            self.optimizer.zero_grad(set_to_none=True)
             if self.ema is not None:
                 self.ema.update(self.model)
 
-        logs.update(alignment_diagnostics(out, batch))
-        logs.update(routing_diagnostics(out))
+        if diagnostics:
+            logs.update(alignment_diagnostics(out, batch))
+            logs.update(routing_diagnostics(out))
         logs["train/routing_frozen"] = float(self.routing_frozen)
         logs["train/lr"] = self.optimizer.param_groups[0]["lr"]
         if out.semantic_delta_norm is not None:
@@ -382,9 +417,10 @@ class Trainer:
         logs["train/decoder_depth"] = out.decoder_router.mean_depth().detach()
         logs["train/encoder_ponder"] = out.encoder_router.mean_ponder().detach()
         logs["train/decoder_ponder"] = out.decoder_router.mean_ponder().detach()
-        flops = self.model.flops(out)
-        logs["train/flops_per_batch"] = flops.total
-        logs["train/flops_saving"] = flops.saving
+        if diagnostics:
+            flops = self.model.flops(out)
+            logs["train/flops_per_batch"] = flops.total
+            logs["train/flops_saving"] = flops.saving
         return {"logs": logs, "out": out, "batch": batch}
 
     # -- validation -------------------------------------------------------
@@ -470,9 +506,13 @@ class Trainer:
         cfg = self.cfg
         self.model.train()
         t0 = time.time()
-        running: dict[str, float] = {}
+        # Values stay on the GPU between log steps; converting each one with
+        # float() every step would force a host sync per metric per step.
+        running: dict = {}
+        counts: dict[str, int] = {}
         count = 0
         log_every = cfg.log.get("log_every", 50)
+        save_last_every = int(cfg.train.get("save_last_every", 1000))
         self.log.info(f"Starting training for {self.total_steps} steps")
 
         while self.step < self.total_steps:
@@ -483,14 +523,25 @@ class Trainer:
             for batch in self.train_loader:
                 if self.step >= self.total_steps:
                     break
-                res = self.train_step(batch)
+                logging_now = (self.step + 1) % log_every == 0
+                res = self.train_step(batch, diagnostics=logging_now)
                 for k, v in res["logs"].items():
-                    running[k] = running.get(k, 0.0) + float(v)
+                    if torch.is_tensor(v):
+                        v = v.detach().float()
+                    running[k] = running.get(k, 0.0) + v
+                    counts[k] = counts.get(k, 0) + 1
                 count += 1
                 self.step += 1
 
                 if self.step % log_every == 0:
-                    means = {k: v / count for k, v in running.items()}
+                    keys = list(running)
+                    vals = [running[k] for k in keys]
+                    tensor_idx = [i for i, v in enumerate(vals) if torch.is_tensor(v)]
+                    if tensor_idx:          # one host sync for all of them
+                        host = torch.stack([vals[i].reshape(()) for i in tensor_idx]).tolist()
+                        for i, h in zip(tensor_idx, host):
+                            vals[i] = h
+                    means = {k: float(v) / counts[k] for k, v in zip(keys, vals)}
                     means["train/steps_per_sec"] = count / max(time.time() - t0, 1e-6)
                     means["train/epoch"] = self.epoch
                     if self.device.type == "cuda":
@@ -504,7 +555,7 @@ class Trainer:
                         f"| saving {means.get('train/flops_saving', 0) * 100:.1f}% "
                         f"| {means['train/steps_per_sec']:.2f} it/s"
                     )
-                    running, count, t0 = {}, 0, time.time()
+                    running, counts, count, t0 = {}, {}, 0, time.time()
 
                 if self.step % cfg.log.get("figure_every", 1000) == 0:
                     log_training_examples(self.model, res["batch"], res["out"], self.logger,
@@ -531,14 +582,23 @@ class Trainer:
                         self.best_val = metrics["val/total"]
                         save_checkpoint(self.ckpt_dir / "best.pt", self.model, self.optimizer,
                                         self.scheduler, self.scaler, self.ema, self.step,
-                                        self.epoch, self.cfg, {"metrics": metrics})
+                                        self.epoch, self.cfg,
+                                        {"metrics": metrics, "best_val": self.best_val})
                 if self.step % cfg.train.get("save_every", 5000) == 0:
                     save_checkpoint(self.ckpt_dir / f"step_{self.step}.pt", self.model,
                                     self.optimizer, self.scheduler, self.scaler, self.ema,
-                                    self.step, self.epoch, self.cfg)
+                                    self.step, self.epoch, self.cfg,
+                                    {"best_val": self.best_val})
                     prune_checkpoints(self.ckpt_dir, cfg.train.get("keep_checkpoints", 3))
+                elif save_last_every > 0 and self.step % save_last_every == 0:
+                    # Cheap insurance against a Colab disconnect: `--resume auto`
+                    # picks this up, so at most `save_last_every` steps are lost.
+                    save_checkpoint(self.ckpt_dir / "last.pt", self.model, self.optimizer,
+                                    self.scheduler, self.scaler, self.ema, self.step,
+                                    self.epoch, self.cfg, {"best_val": self.best_val})
 
         save_checkpoint(self.ckpt_dir / "final.pt", self.model, self.optimizer, self.scheduler,
-                        self.scaler, self.ema, self.step, self.epoch, self.cfg)
+                        self.scaler, self.ema, self.step, self.epoch, self.cfg,
+                        {"best_val": self.best_val})
         self.log.info("Training finished.")
         self.logger.close()

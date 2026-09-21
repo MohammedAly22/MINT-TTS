@@ -4,6 +4,9 @@ torchaudio>=2.1
 numpy>=1.24
 PyYAML>=6.0
 tqdm>=4.65
+# Compiled monotonic alignment search. Optional -- MAS falls back to a torch
+# loop without it -- but that loop costs ~30k kernel launches per step.
+numba>=0.59
 soundfile>=0.12
 tensorboard>=2.14
 

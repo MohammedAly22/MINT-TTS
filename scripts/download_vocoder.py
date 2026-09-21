@@ -17,6 +17,14 @@ repo's mel settings exactly):
 
     python scripts/download_vocoder.py --hf-repo speechbrain/tts-hifigan-ljspeech         --hf-file generator.ckpt
 
+24 kHz (the Egyptian Arabic corpus): NVIDIA BigVGAN-v2, whose mel recipe is
+this repo's exactly at 100 bands (configs/dataset_egyptian.yaml):
+
+    python scripts/download_vocoder.py --bigvgan
+
+`nvidia/tts_hifigan` is NOT usable here: it is a 22.05 kHz NeMo archive
+(`.nemo`), with no `model.ckpt` in it -- hence the 404.
+
 Also usable:
   * official release: https://github.com/jik876/hifi-gan (LJ_V1 / LJ_FT_T2_V1,
     on Google Drive -- download by hand, then pass --local)
@@ -70,7 +78,23 @@ def main() -> int:
     ap.add_argument("--local", default=None)
     ap.add_argument("--variant", choices=["v1", "v3"], default="v1")
     ap.add_argument("--out-dir", default="pretrained/hifigan")
+    ap.add_argument("--bigvgan", nargs="?", const="nvidia/bigvgan_v2_24khz_100band_256x",
+                    default=None, metavar="REPO",
+                    help="fetch + verify a BigVGAN-v2 generator (default: the 24 kHz one)")
     args = ap.parse_args()
+
+    if args.bigvgan:
+        from mint_tts.models.vocoder import load_bigvgan
+
+        gen, h = load_bigvgan(args.bigvgan)
+        with torch.inference_mode():
+            wav = gen(torch.randn(1, h["num_mels"], 40))
+        print(f"OK: {args.bigvgan} -- {h['sampling_rate']} Hz, {h['num_mels']} mels, "
+              f"hop {h['hop_size']}, fmax {h.get('fmax') or h['sampling_rate'] // 2}; "
+              f"{wav.shape[-1]} samples from 40 frames.")
+        print("Set in your config:\n  vocoder:\n    name: bigvgan\n"
+              f"    repo: {args.bigvgan}")
+        return 0
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

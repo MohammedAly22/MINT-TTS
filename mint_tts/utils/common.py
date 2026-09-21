@@ -63,9 +63,21 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
-        for k, v in model.state_dict().items():
-            if k in self.shadow:
-                self.shadow[k].mul_(self.decay).add_(v.detach().float(), alpha=1 - self.decay)
+        # One fused multi-tensor op instead of a Python loop over ~200 tensors
+        # (and a fresh state_dict() walk) on every optimiser step.
+        if getattr(self, "_pairs_model", None) is not model:
+            live = model.state_dict()
+            keys = [k for k in self.shadow if k in live]
+            self._shadow_list = [self.shadow[k] for k in keys]
+            self._live_list = [live[k] for k in keys]
+            self._same_dtype = all(a.dtype == b.dtype for a, b in
+                                   zip(self._shadow_list, self._live_list))
+            self._pairs_model = model
+        if self._same_dtype:
+            torch._foreach_lerp_(self._shadow_list, self._live_list, 1 - self.decay)
+        else:
+            for sh, v in zip(self._shadow_list, self._live_list):
+                sh.lerp_(v.float(), 1 - self.decay)
 
     @torch.no_grad()
     def apply_to(self, model: torch.nn.Module) -> None:
@@ -86,6 +98,7 @@ class EMA:
     def load_state_dict(self, state: dict) -> None:
         self.decay = state.get("decay", self.decay)
         self.shadow = {k: v.float() for k, v in state.get("shadow", {}).items()}
+        self._pairs_model = None      # the cached tensor lists point at the old dict
 
 
 def save_checkpoint(path: str | Path, model, optimizer=None, scheduler=None, scaler=None,
@@ -108,8 +121,41 @@ def save_checkpoint(path: str | Path, model, optimizer=None, scheduler=None, sca
         payload["ema"] = ema.state_dict()
     if extra:
         payload["extra"] = extra
-    torch.save(payload, path)
+    # Write-then-rename: a Colab disconnect mid-save (checkpoints often live
+    # on Google Drive) must leave the previous file intact, not a truncated one.
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
     return path
+
+
+def checkpoint_step(path: str | Path) -> int:
+    """The training step stored in a checkpoint, read without loading it all."""
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    except Exception:
+        try:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception:
+            return -1
+    return int(ckpt.get("step", -1))
+
+
+def find_latest_checkpoint(directory: str | Path) -> Path | None:
+    """The most advanced checkpoint in a run directory (last/step_*/final/best).
+
+    Chosen by the step stored inside, not by name or mtime: `best.pt` can be
+    far older than `last.pt`, and Drive syncing rewrites mtimes.
+    """
+    directory = Path(directory)
+    if not directory.exists():
+        return None
+    best, best_step = None, -1
+    for f in directory.glob("*.pt"):
+        step = checkpoint_step(f)
+        if step > best_step:
+            best, best_step = f, step
+    return best
 
 
 def load_checkpoint(path: str | Path, model=None, optimizer=None, scheduler=None, scaler=None,

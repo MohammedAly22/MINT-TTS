@@ -36,6 +36,10 @@ class AudioConfig:
     fmin_f0: float = 60.0
     fmax_f0: float = 600.0
     pitch_threshold: float = 0.35     # autocorrelation peak needed to call a frame voiced
+    # On-disk dtype of the cached mels. float16 halves the cache (72 h at 100
+    # bands: 9.7 GB -> 4.9 GB) at <= 0.008 log-mel rounding; every loader
+    # casts back to float32.
+    mel_dtype: str = "float32"
 
     @classmethod
     def from_cfg(cls, cfg) -> "AudioConfig":

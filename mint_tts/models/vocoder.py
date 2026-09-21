@@ -10,7 +10,9 @@ not for quality claims).
 
 from __future__ import annotations
 
+import importlib
 import json
+import sys
 from pathlib import Path
 
 import torch
@@ -201,6 +203,69 @@ class GriffinLimVocoder(nn.Module):
         return wav.unsqueeze(1) if wav.dim() == 2 else wav
 
 
+BIGVGAN_24K = "nvidia/bigvgan_v2_24khz_100band_256x"
+
+
+def load_bigvgan(repo: str = BIGVGAN_24K, local_dir: str | None = None) -> tuple[nn.Module, dict]:
+    """NVIDIA BigVGAN-v2 from its Hugging Face repo, weight norm removed.
+
+    The model code ships inside the repo (bigvgan.py and friends) and imports
+    its helpers as top-level modules (`utils`, `env`, `activations`), so it is
+    imported with the snapshot on sys.path and those names isolated from
+    anything else that might share them.
+    """
+    from huggingface_hub import snapshot_download
+
+    path = local_dir or snapshot_download(
+        repo, allow_patterns=["*.py", "config.json", "bigvgan_generator.pt",
+                              "alias_free_activation/**"])
+    h = json.loads((Path(path) / "config.json").read_text(encoding="utf-8"))
+    clashing = ("utils", "env", "activations", "meldataset", "bigvgan", "alias_free_activation")
+    saved = {k: sys.modules.pop(k) for k in list(sys.modules)
+             if k.split(".")[0] in clashing}
+    sys.path.insert(0, str(path))
+    try:
+        bigvgan = importlib.import_module("bigvgan")
+        env = importlib.import_module("env")
+        # Built directly rather than via BigVGAN.from_pretrained, whose
+        # signature breaks against newer huggingface_hub releases.
+        model = bigvgan.BigVGAN(env.AttrDict(h), use_cuda_kernel=False)
+        state = torch.load(Path(path) / "bigvgan_generator.pt", map_location="cpu",
+                           weights_only=False)
+        model.load_state_dict(state.get("generator", state))
+    finally:
+        sys.path.remove(str(path))
+        for k in [k for k in sys.modules if k.split(".")[0] in clashing]:
+            sys.modules.pop(k)
+        sys.modules.update(saved)
+    model.remove_weight_norm()
+    return model.eval(), h
+
+
+def check_vocoder_matches(h: dict, audio_cfg, name: str) -> None:
+    """Refuse a vocoder trained on different mel settings.
+
+    A mismatch does not fail loudly on its own -- it produces confident,
+    buzzing garbage -- so every setting that defines the mel is compared.
+    """
+    fmax = h.get("fmax") or h.get("sampling_rate", 0) / 2
+    want = {
+        "sampling_rate": (h.get("sampling_rate"), audio_cfg.sample_rate),
+        "num_mels": (h.get("num_mels"), audio_cfg.n_mels),
+        "hop_size": (h.get("hop_size"), audio_cfg.hop_length),
+        "n_fft": (h.get("n_fft"), audio_cfg.n_fft),
+        "win_size": (h.get("win_size"), audio_cfg.win_length),
+        "fmax": (float(fmax), float(audio_cfg.get("fmax") or audio_cfg.sample_rate / 2)),
+    }
+    bad = {k: v for k, v in want.items() if v[0] is not None and v[0] != v[1]}
+    if bad:
+        detail = ", ".join(f"{k}: vocoder {a} vs data {b}" for k, (a, b) in bad.items())
+        raise ValueError(
+            f"{name} was trained on different mel settings ({detail}). Change "
+            "`audio:` to match and re-run preprocessing, or pick another vocoder."
+        )
+
+
 class Vocoder(nn.Module):
     """Uniform wrapper: `Vocoder(cfg)(mel) -> waveform (B, 1, N)`."""
 
@@ -235,6 +300,21 @@ class Vocoder(nn.Module):
                         "vocoder.name=griffin_lim for a download-free fallback."
                     )
             self.model = gen.eval()
+        elif self.name == "bigvgan":
+            repo = v.get("repo", BIGVGAN_24K)
+            try:
+                gen, h = load_bigvgan(repo, v.get("local_dir"))
+                check_vocoder_matches(h, cfg.audio, repo)
+                self.model = gen
+                self.loaded = True
+            except Exception as exc:
+                if v.get("require_checkpoint", True):
+                    raise
+                # A missing vocoder should cost audio quality, not the run.
+                print(f"[vocoder] BigVGAN unavailable ({exc}); falling back to Griffin-Lim.")
+                self.name = "griffin_lim"
+                self.model = GriffinLimVocoder(cfg.audio, v.get("griffin_lim_iters", 32)).eval()
+                self.loaded = False
         elif self.name == "griffin_lim":
             self.model = GriffinLimVocoder(cfg.audio, v.get("griffin_lim_iters", 32)).eval()
             self.loaded = True
@@ -249,7 +329,7 @@ class Vocoder(nn.Module):
     def forward(self, mel: torch.Tensor) -> torch.Tensor:
         if mel.dim() == 2:
             mel = mel.unsqueeze(0)
-        return self.model(mel.to(self.device)).clamp(-1, 1)
+        return self.model(mel.to(self.device, torch.float32)).clamp(-1, 1)
 
     @torch.inference_mode()
     def to_wav(self, mel: torch.Tensor) -> torch.Tensor:

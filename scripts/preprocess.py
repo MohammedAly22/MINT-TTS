@@ -63,7 +63,8 @@ def main() -> int:
             sem = res["semantic"]
             log.info(f"  semantic: {sem['semantic_files']} files from "
                      f"{sem['semantic_model']} (layer {sem['semantic_layer']}, "
-                     f"hidden {sem['semantic_hidden_size']})")
+                     f"hidden {sem['semantic_hidden_size']}; "
+                     f"{sem.get('semantic_reused', 0)} reused from cache)")
             if sem.get("semantic_word_fallbacks"):
                 log.warning(f"  {sem['semantic_word_fallbacks']} words needed "
                             "single-word re-encoding (usually truncation of a "

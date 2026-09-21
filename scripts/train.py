@@ -3,6 +3,7 @@
     python scripts/train.py --config configs/exp2_token.yaml
     python scripts/train.py --config configs/exp0_dense.yaml --override train.batch_size=8
     python scripts/train.py --config configs/exp2_token.yaml --resume runs/exp2_token/checkpoints/best.pt
+    python scripts/train.py --config configs/exp2_token.yaml --resume auto   # latest, or fresh
 
 Monitor with:  tensorboard --logdir runs
 """
@@ -24,7 +25,9 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True)
     ap.add_argument("--override", nargs="*", default=[], help="dotted.key=value overrides")
-    ap.add_argument("--resume", default=None)
+    ap.add_argument("--resume", default=None,
+                    help="checkpoint path, or 'auto' for the most advanced checkpoint "
+                         "in this run's directory (starts fresh when there is none)")
     ap.add_argument("--run-name", default=None)
     args = ap.parse_args()
 

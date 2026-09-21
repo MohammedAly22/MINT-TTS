@@ -184,6 +184,7 @@ train:
   batch_size: 64
   eval_batch_size: 16
   num_workers: 8
+  prefetch_factor: 4
   pin_memory: true
   max_steps: 300000
   lr: 6.0e-4
@@ -202,6 +203,9 @@ train:
   val_every: 2000
   val_batches: 10
   save_every: 5000
+  # Rolling `last.pt` so a Colab disconnect loses at most this many steps;
+  # `train.py --resume auto` picks up the most advanced checkpoint.
+  save_last_every: 1000
   keep_checkpoints: 3
   scheduler:
     name: cosine
@@ -215,9 +219,13 @@ eval:
   n_audio_eval: 2
 
 vocoder:
-  # Griffin-Lim is the zero-download default and sounds rough. Any judgement
-  # by ear needs a real 24 kHz vocoder -- see the notebook for fetching one.
-  name: griffin_lim
+  # NVIDIA BigVGAN-v2, 24 kHz / 100 bands / hop 256 -- the exact mel recipe
+  # of dataset_egyptian.yaml, fetched from the Hub on first use (~450 MB).
+  # If the download fails, audio falls back to Griffin-Lim instead of
+  # stopping the run.
+  name: bigvgan
+  repo: nvidia/bigvgan_v2_24khz_100band_256x
+  require_checkpoint: false
   griffin_lim_iters: 32
 
 log:

@@ -17,7 +17,8 @@ pillow>=10.0
 #   transformers -- the frozen MARBERTv2 that supplies contextual word vectors.
 #     Required to PREPROCESS and to SYNTHESISE with semantics enabled; the
 #     training loop itself never touches it, because the vectors are cached.
-#   huggingface_hub / librosa -- scripts/prepare_egyptian.py only. Note it
+#   huggingface_hub / librosa -- scripts/prepare_egyptian.py, and the
+#     BigVGAN vocoder (its bundled mel helpers import librosa). Note it
 #     does NOT use `datasets`: that repo stores 15,653 individual .wav files,
 #     so load_dataset() fetches them one request at a time, hits the Hub's
 #     rate limit, and downloads everything before any --limit could apply.

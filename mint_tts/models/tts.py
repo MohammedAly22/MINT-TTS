@@ -22,6 +22,7 @@ from ..modules.semantic import SemanticAdapter
 from ..modules.speaker import ReferenceEncoder
 from ..modules.aligner import (
     AlignmentEncoder,
+    beta_binomial_prior_batch,
     monotonic_alignment_search,
     path_to_durations,
 )
@@ -167,6 +168,13 @@ class AdaptiveTTS(nn.Module):
             dropout=m.get("dropout", 0.1), activation="tanh",
         )
         self.min_duration = int(m.get("min_duration", 1))
+        # The alignment prior is built here, on the model's device, from the
+        # lengths alone -- see beta_binomial_prior_batch for why not in the
+        # DataLoader. A batch that already carries one still takes precedence.
+        data_cfg = cfg.get("data", {}) or {}
+        self.use_attn_prior = bool(data_cfg.get("use_attn_prior", True))
+        self.attn_prior_scaling = float(data_cfg.get("attn_prior_scaling", 1.0))
+        self.mas_backend = str(m.get("mas_backend", "auto"))
 
     # -- helpers ----------------------------------------------------------
     def _condition(self, x, speakers, emotions, speaker_vec=None, languages=None):
@@ -276,9 +284,15 @@ class AdaptiveTTS(nn.Module):
             # in practice the alignment that had been forming was destroyed the
             # moment routing collapsed. The embedding is stable, so alignment
             # and compute allocation can no longer destabilise each other.
+            if attn_prior is None and self.use_attn_prior:
+                attn_prior = beta_binomial_prior_batch(
+                    token_lens, mel_lens, tokens.size(1), mels.size(-1),
+                    self.attn_prior_scaling,
+                )
             attn_logprob, _ = self.aligner(emb, mels, text_mask, attn_prior)
             attn_hard = monotonic_alignment_search(
-                attn_logprob.squeeze(1).float(), token_lens, mel_lens
+                attn_logprob.squeeze(1).float(), token_lens, mel_lens,
+                backend=self.mas_backend,
             ).to(h.dtype)
             attn_soft = attn_logprob.squeeze(1).exp()
             duration_target = path_to_durations(attn_hard)

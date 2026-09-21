@@ -155,7 +155,7 @@ def process_one(
         if len(enc.ids) < 2:
             return {"uid": rec.uid, "error": "empty token sequence"}
 
-        np.save(paths.mel / f"{rec.uid}.npy", mel.numpy().astype(np.float32))
+        np.save(paths.mel / f"{rec.uid}.npy", mel.numpy().astype(ac.mel_dtype))
         np.save(paths.pitch / f"{rec.uid}.npy", pitch.numpy().astype(np.float32))
         np.save(paths.energy / f"{rec.uid}.npy", energy.numpy().astype(np.float32))
 
@@ -266,6 +266,7 @@ def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "tra
             layer=int(sem_cfg.get("layer", -1)),
             device=sem_cfg.get("device", "auto"),
             batch_log=split_name,
+            reuse=bool(sem_cfg.get("reuse_cache", True)),
         )
 
     speaker_map, emotion_map = build_label_maps(records)
@@ -306,7 +307,7 @@ def run_preprocess(cfg, manifest_path: str, out_dir: str, split_name: str = "tra
 
 def extract_semantics(rows: list[dict], out_dir: Path, model_name: str = "marbert",
                       layer: int = -1, device: str = "auto",
-                      batch_log: str = "train") -> dict:
+                      batch_log: str = "train", reuse: bool = True) -> dict:
     """Cache one contextual vector per word, per utterance.
 
     Writing these to disk is what keeps the language model out of the training
@@ -318,20 +319,36 @@ def extract_semantics(rows: list[dict], out_dir: Path, model_name: str = "marber
     out_dir.mkdir(parents=True, exist_ok=True)
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    enc = SemanticEncoder(model_name, layer=layer, device=device)
-    n_written = 0
-    for row in tqdm(rows, desc=f"semantic[{batch_log}]"):
-        feats = enc.encode(row["words"])
+    # Reuse vectors already on disk. The directory is keyed by (model, layer),
+    # so a cached file can only be stale if the word list changed -- which is
+    # checked by count. Re-running preprocessing for new mel settings then
+    # costs the audio pass only, not another hour of BERT.
+    todo, reused = [], 0
+    for row in rows:
         path = out_dir / f"{row['uid']}.npy"
-        np.save(path, feats.vectors.astype(np.float32))
         row["semantic"] = str(path.as_posix())
         row["n_words"] = len(row["words"])
-        n_written += 1
+        if reuse and path.exists():
+            try:
+                if np.load(path, mmap_mode="r").shape[0] == len(row["words"]):
+                    reused += 1
+                    continue
+            except Exception:
+                pass
+        todo.append(row)
+    enc = SemanticEncoder(model_name, layer=layer, device=device) if todo else None
+    hidden = int(enc.hidden_size) if enc is not None else int(
+        np.load(rows[0]["semantic"], mmap_mode="r").shape[1])
+    for row in tqdm(todo, desc=f"semantic[{batch_log}]"):
+        feats = enc.encode(row["words"])
+        np.save(row["semantic"], feats.vectors.astype(np.float32))
+    n_written = len(todo) + reused
     return {
         "semantic_model": resolve_model_name(model_name),
         "semantic_layer": int(layer),
-        "semantic_hidden_size": int(enc.hidden_size),
+        "semantic_hidden_size": hidden,
+        "semantic_reused": reused,
         "semantic_dir": str(out_dir.as_posix()),
         "semantic_files": n_written,
-        "semantic_word_fallbacks": int(enc._fallbacks),
+        "semantic_word_fallbacks": int(enc._fallbacks) if enc is not None else 0,
     }

@@ -101,6 +101,42 @@ def beta_binomial_prior(text_len: int, mel_len: int, scaling: float = 1.0) -> to
     return p.float()  # (T_mel, T_text)
 
 
+def beta_binomial_prior_batch(
+    text_lens: torch.Tensor, mel_lens: torch.Tensor, max_text: int, max_mel: int,
+    scaling: float = 1.0,
+) -> torch.Tensor:
+    """The same prior for a whole padded batch, on whatever device the lengths live.
+
+    Building it per utterance in the DataLoader cost 25-55 ms of float64
+    `lgamma` per clip at this corpus's lengths -- seconds of CPU per batch --
+    and then shipped a ~200 MB (B, T_mel, T_text) tensor through worker IPC,
+    pinning and the host->device copy on every step. On the GPU it is a few
+    elementwise kernels.
+
+    Every term that is constant along a mel row (the Beta normaliser and
+    lgamma(n + a + b)) cancels in the per-row normalisation, so only two large
+    lgamma evaluations remain. float32 is accurate to ~1e-3 in log space here,
+    far below anything the aligner can resolve.
+    Returns (B, max_mel, max_text), zero on padding.
+    """
+    device = text_lens.device
+    t = text_lens.to(torch.float32).view(-1, 1, 1)                  # (B,1,1)
+    l = mel_lens.to(torch.float32).view(-1, 1, 1)
+    k = torch.arange(max_text, device=device, dtype=torch.float32).view(1, 1, -1)
+    m = torch.arange(1, max_mel + 1, device=device, dtype=torch.float32).view(1, -1, 1)
+    n = t - 1
+    a = scaling * m
+    b = scaling * (l + 1 - m)
+    valid_x = k < t                                                  # (B,1,Tt)
+    valid_y = m <= l                                                 # (B,Ty,1)
+    # clamp keeps lgamma finite on padding; those cells are masked below
+    n_minus_k = (n - k).clamp_min(0)
+    log_c = torch.lgamma(n + 1) - torch.lgamma(k + 1) - torch.lgamma(n_minus_k + 1)
+    logp = log_c + torch.lgamma(k + a) + torch.lgamma(n_minus_k + b.clamp_min(1e-3))
+    logp = logp.masked_fill(~valid_x, float("-inf"))
+    p = torch.softmax(logp, dim=-1)
+    return p.masked_fill(~valid_y, 0.0)
+
 class ForwardSumLoss(nn.Module):
     """CTC-based forward-sum over all monotonic alignments."""
 
@@ -128,18 +164,87 @@ class BinLoss(nn.Module):
         return -log_sum / hard_attn.sum().clamp_min(1.0)
 
 
+try:  # numba is optional: without it MAS falls back to the torch loop below
+    import numba as _numba
+    import numpy as _np
+
+    @_numba.njit(nogil=True, cache=True)
+    def _mas_one(value, t_x, t_y, out):  # pragma: no cover - compiled
+        """Viterbi for one utterance; writes per-token durations into `out`."""
+        neg = -1e30
+        cum = _np.full((t_y, t_x), neg, dtype=_np.float64)
+        for y in range(t_y):
+            # x can neither run ahead of y nor fall so far behind that the
+            # last token becomes unreachable
+            lo = max(0, t_x + y - t_y)
+            hi = min(t_x, y + 1)
+            for x in range(lo, hi):
+                if y == 0:
+                    prev = 0.0 if x == 0 else neg
+                else:
+                    stay = cum[y - 1, x]
+                    move = cum[y - 1, x - 1] if x > 0 else neg
+                    prev = move if move > stay else stay
+                cum[y, x] = prev + value[y, x]
+        index = t_x - 1
+        for y in range(t_y - 1, -1, -1):
+            out[index] += 1
+            if index > 0 and (index == y or cum[y - 1, index - 1] > cum[y - 1, index]):
+                index -= 1
+
+    @_numba.njit(parallel=True, cache=True)
+    def _mas_batch(values, t_xs, t_ys, out):  # pragma: no cover - compiled
+        for b in _numba.prange(values.shape[0]):
+            if t_xs[b] > 0 and t_ys[b] > 0:
+                _mas_one(values[b], t_xs[b], t_ys[b], out[b])
+
+    HAVE_NUMBA = True
+except Exception:  # pragma: no cover - depends on the environment
+    HAVE_NUMBA = False
+
+
+def durations_to_path(durations: torch.Tensor, max_mel: int, dtype=torch.float32) -> torch.Tensor:
+    """(B, T_text) integer durations -> (B, T_mel, T_text) hard 0/1 path."""
+    B, Tx = durations.shape
+    cum = durations.to(torch.long).cumsum(1)
+    ar = torch.arange(max_mel, device=durations.device).unsqueeze(0).expand(B, -1)
+    idx = torch.searchsorted(cum.contiguous(), ar.contiguous(), right=True)
+    valid = ar < cum[:, -1:]
+    path = F.one_hot(idx.clamp(max=Tx - 1), num_classes=Tx).to(dtype)
+    return path * valid.unsqueeze(-1).to(dtype)
+
+
 @torch.no_grad()
 def monotonic_alignment_search(
-    neg_cent: torch.Tensor, text_lens: torch.Tensor, mel_lens: torch.Tensor
+    neg_cent: torch.Tensor, text_lens: torch.Tensor, mel_lens: torch.Tensor,
+    backend: str = "auto",
 ) -> torch.Tensor:
     """Viterbi over monotonic, surjective alignments.
 
     neg_cent: (B, T_mel, T_text) log-likelihood of aligning mel frame y to
     text token x. Returns a hard 0/1 path of the same shape.
 
-    Vectorised over batch and text; the only Python loop is over mel frames,
-    which keeps it fast enough to run every training step without numba.
+    With numba installed this runs compiled on the CPU, parallel over the
+    batch: the torch fallback issues ~8 tiny kernels per mel frame in both
+    passes -- ~30k launches per step at 1800 frames -- which made the search
+    alone a large fraction of every training step.
     """
+    if backend == "numba" or (backend == "auto" and HAVE_NUMBA):
+        if not HAVE_NUMBA:
+            raise RuntimeError("numba is not installed")
+        values = neg_cent.detach().float().cpu().numpy()
+        t_xs = text_lens.detach().cpu().numpy().astype(_np.int64)
+        t_ys = mel_lens.detach().cpu().numpy().astype(_np.int64)
+        dur = _np.zeros((values.shape[0], values.shape[2]), dtype=_np.int64)
+        _mas_batch(values, t_xs, t_ys, dur)
+        dur_t = torch.from_numpy(dur).to(neg_cent.device, non_blocking=True)
+        return durations_to_path(dur_t, neg_cent.shape[1], neg_cent.dtype)
+    return _mas_torch(neg_cent, text_lens, mel_lens)
+
+
+def _mas_torch(neg_cent: torch.Tensor, text_lens: torch.Tensor,
+               mel_lens: torch.Tensor) -> torch.Tensor:
+    """Vectorised over batch and text; loops in Python over mel frames."""
     B, Ty, Tx = neg_cent.shape
     device, dtype = neg_cent.device, neg_cent.dtype
     x_range = torch.arange(Tx, device=device)

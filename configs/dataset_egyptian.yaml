@@ -16,7 +16,12 @@ audio:
   n_fft: 1024
   hop_length: 256        # 93.75 frames/s
   win_length: 1024
-  n_mels: 80
+  # 100 bands, not 80: this is the exact mel of NVIDIA's BigVGAN-v2 24 kHz
+  # vocoder (slaney filters, reflect pad, center=False, log clamp 1e-5,
+  # fmax = Nyquist), so its pretrained weights apply unchanged. No 80-band
+  # 24 kHz vocoder exists to download.
+  n_mels: 100
+  mel_dtype: float16     # halves the cache that the notebook archives to Drive
   fmin: 0.0
   fmax: 12000.0          # Nyquist at 24 kHz; keep the full band
   center: false
