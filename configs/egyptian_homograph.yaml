@@ -33,8 +33,9 @@
 # Order of operations (the mining pass needs a working aligner):
 #   preprocess -> mine (text-only) -> train -> re-mine (acoustic) -> train on
 #
-# Sized for an H200 (140 GB). See `egyptian_homograph_small.yaml` for a
-# version that fits a 24 GB card.
+# Sized for an A100 80 GB / H100 / H200. `egyptian_homograph_t4.yaml` is the
+# same model with training settings for a 16 GB T4; `egyptian_homograph_small.yaml`
+# is a narrower model.
 # =============================================================================
 
 _base_: [base.yaml, dataset_egyptian.yaml]

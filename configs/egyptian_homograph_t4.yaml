@@ -1,0 +1,36 @@
+# =============================================================================
+# The Egyptian experiment on a Colab T4 (16 GB, Turing).
+#
+#   python scripts/train.py --config configs/egyptian_homograph_t4.yaml --resume auto
+#
+# Only the training hyperparameters differ from egyptian_homograph.yaml: the
+# model, data and losses are identical, and so is `run_name`, so a run started
+# on a bigger GPU continues here from its latest checkpoint.
+#
+# Memory, measured (saved activations under 16-bit autocast, per sample):
+#   longest clip (1800 frames)  ~0.55 GB     average clip (~1550)  ~0.47 GB
+# The backward pass adds ~40% transient; weights + grads + Adam + EMA for
+# 16.5M parameters are ~0.35 GB. Batch 16 therefore peaks around 13 GB on a
+# batch of the longest clips (length bucketing puts them together), leaving
+# headroom on the ~15 GB a T4 exposes. Batch 24 would not fit.
+#
+# On throughput: it/s is NOT comparable with the LJSpeech runs. These clips
+# average ~16.5 s against LJSpeech's 6.6 s, and the model is d_model 512
+# against 384, so one step here is ~4-5x the work of an LJSpeech step at the
+# same batch size. Compare `train/steps_per_sec x batch_size x mean clip
+# length` (seconds of audio per second) instead.
+# =============================================================================
+
+_base_: egyptian_homograph.yaml
+
+train:
+  batch_size: 16
+  eval_batch_size: 8
+  # Colab's T4 runtime has 2 vCPUs. More workers than cores only adds
+  # contention with the main process (which also runs the alignment search).
+  num_workers: 2
+  prefetch_factor: 4
+  # sqrt scaling from 6e-4 at batch 64
+  lr: 3.0e-4
+  amp: true
+  bf16: false          # Turing has no bf16: fp16 autocast + dynamic loss scaling
