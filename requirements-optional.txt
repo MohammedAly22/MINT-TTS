@@ -17,11 +17,13 @@ pillow>=10.0
 #   transformers -- the frozen MARBERTv2 that supplies contextual word vectors.
 #     Required to PREPROCESS and to SYNTHESISE with semantics enabled; the
 #     training loop itself never touches it, because the vectors are cached.
-#   datasets / librosa -- scripts/prepare_egyptian.py only (corpus download).
+#   huggingface_hub / librosa -- scripts/prepare_egyptian.py only. Note it
+#     does NOT use `datasets`: that repo stores 15,653 individual .wav files,
+#     so load_dataset() fetches them one request at a time, hits the Hub's
+#     rate limit, and downloads everything before any --limit could apply.
 #   arabic-reshaper + python-bidi -- correct Arabic rendering in matplotlib
 #     figures. Without them the heatmap labels appear reversed and unjoined.
 transformers>=4.40
-datasets>=2.18
 librosa>=0.10
 arabic-reshaper>=3.0
 python-bidi>=0.4
