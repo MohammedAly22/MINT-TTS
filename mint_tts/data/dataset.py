@@ -70,9 +70,9 @@ class TTSDataset(Dataset):
         # Per-token difficulty prior. Computed here (cheaply, from the cached
         # word list) rather than in preprocessing, so the lexicon can be
         # edited without re-running feature extraction over 100 hours.
-        self.use_difficulty = float(
-            cfg.loss.get("compute", {}).get("difficulty_relief", 0.0)
-        ) > 0
+        comp = cfg.loss.get("compute", {}) or {}
+        self.use_difficulty = (float(comp.get("difficulty_relief", 0.0)) > 0
+                               or bool(comp.get("report_difficulty", False)))
         # Difficulty comes from MINED scores when they exist, and from the
         # structural prior (unwritten-vowel clitics) until then. There is no
         # hand-written word list in either path: see text/ambiguity.py.

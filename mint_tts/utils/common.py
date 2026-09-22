@@ -129,6 +129,23 @@ def save_checkpoint(path: str | Path, model, optimizer=None, scheduler=None, sca
     return path
 
 
+def warm_start_weights(path: str | Path, prefer_ema: bool = True) -> dict:
+    """A model state_dict from a checkpoint, for starting a NEW run from it.
+
+    The EMA weights are preferred: they are what validation and synthesis
+    use, so they are the model whose quality was actually measured. Only
+    weights are returned -- a new stage gets a fresh optimiser, schedule and
+    step counter.
+    """
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    state = dict(ckpt.get("model", ckpt))
+    shadow = (ckpt.get("ema") or {}).get("shadow", {}) if prefer_ema else {}
+    for k, v in shadow.items():
+        if k in state:
+            state[k] = v.to(state[k].dtype)
+    return state
+
+
 def checkpoint_step(path: str | Path) -> int:
     """The training step stored in a checkpoint, read without loading it all."""
     try:

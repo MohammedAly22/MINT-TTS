@@ -40,7 +40,7 @@ def test_soft_and_hard_paths_agree(routing, share):
 
     assert torch.allclose(soft.ponder, hard.ponder, atol=1e-5)
     assert torch.allclose(soft.output, hard.output, atol=1e-4)
-    assert soft.token_steps == pytest.approx(hard.token_steps)
+    assert float(soft.token_steps) == pytest.approx(hard.token_steps)
 
 
 def test_hard_path_does_less_work_than_dense():
@@ -50,8 +50,8 @@ def test_hard_path_does_less_work_than_dense():
     with torch.inference_mode():
         out = stack(x, mask, budget=torch.tensor([[0.0, 1.0]]), hard=True)
     dense_token_steps = 24 * 6
-    assert out.token_steps < dense_token_steps
-    assert out.attn_kv_steps < dense_token_steps * 24
+    assert float(out.token_steps) < dense_token_steps
+    assert float(out.attn_kv_steps) < dense_token_steps * 24
 
 
 def test_fixed_routing_uses_every_step():
@@ -60,7 +60,7 @@ def test_fixed_routing_uses_every_step():
     mask = lengths_to_mask(torch.tensor([9, 6]), 9)
     out = stack(x, mask)
     assert torch.allclose(out.ponder[mask], torch.full((int(mask.sum()),), 4.0))
-    assert out.token_steps == pytest.approx(float(mask.sum()) * 4)
+    assert float(out.token_steps) == pytest.approx(float(mask.sum()) * 4)
 
 
 def test_min_steps_is_respected():

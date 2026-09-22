@@ -51,9 +51,12 @@ class RouterOutput:
     halting_probs: torch.Tensor          # (B, N, T) per-step halting probability
     step_active: torch.Tensor            # (B, N, T) 1 where the step was executed
     mask: torch.Tensor                   # (B, T) bool, True = real token
-    token_steps: float = 0.0             # sum of executed token-steps (for FLOPs)
-    kv_token_steps: float = 0.0          # positions whose keys/values were projected
-    attn_kv_steps: float = 0.0           # sum of query*key pairs actually scored
+    # FLOP accounting. 0-d tensors on the training paths (reading them back
+    # would stall the GPU every step), plain floats on the inference path;
+    # `float()` works on either and the FLOP counter applies it.
+    token_steps: float | torch.Tensor = 0.0     # sum of executed token-steps
+    kv_token_steps: float | torch.Tensor = 0.0  # positions whose keys/values were projected
+    attn_kv_steps: float | torch.Tensor = 0.0   # sum of query*key pairs actually scored
     hard: bool = False
     routing_is_fixed: bool = False   # True when every position took every step
     extras: dict = field(default_factory=dict)
@@ -270,34 +273,42 @@ class AdaptiveStack(nn.Module):
         until the penalty engages keeps that phase clean.
         """
         if force_full_depth or self.routing == "fixed":
-            return self._forward_full(x, mask)
+            return self._forward_full(x, mask, max_steps_override)
         if hard:
             return self._forward_hard(x, mask, budget, max_steps_override, router_context)
         return self._forward_soft(x, mask, budget, max_steps_override, router_context)
 
-    def _forward_full(self, x, mask):
-        """Every position takes every step; the router is not consulted."""
+    def _forward_full(self, x, mask, max_steps_override: int | None = None):
+        """Every position takes the same number of steps; the router is not consulted.
+
+        `max_steps_override` truncates the whole stack to that depth -- the
+        random-depth training of the dense stage uses it so that every
+        intermediate state is a usable output, which is what later lets the
+        router stop a token early without the result falling apart.
+        """
         B, T, _ = x.shape
         dtype = x.dtype
         m = mask.to(dtype)
         state = x
-        for step in range(self.max_steps):
+        n_steps = int(max_steps_override or self.max_steps)
+        for step in range(n_steps):
             sb = self._step_bias(step, x.device, dtype)
             inp = state + sb if sb is not None else state
             state = self.block(step)(inp, mask, kv_input=inp) * m.unsqueeze(-1)
         ones = m.expand(B, T)
-        n = float(self.max_steps)
+        n = float(n_steps)
+        real = m.detach().sum()
         return RouterOutput(
             output=self.final_norm(state) * m.unsqueeze(-1),
             ponder=ones * n,
             n_updates=ones * n,
             remainders=torch.zeros_like(ones),
-            halting_probs=torch.stack([ones] * self.max_steps, 1),
-            step_active=torch.stack([ones] * self.max_steps, 1),
+            halting_probs=torch.stack([ones] * n_steps, 1),
+            step_active=torch.stack([ones] * n_steps, 1),
             mask=mask,
-            token_steps=float(m.sum()) * n,
-            kv_token_steps=float(m.sum()) * n,
-            attn_kv_steps=float((m.sum(1) ** 2).sum()) * n,
+            token_steps=real * n,
+            kv_token_steps=real * n,
+            attn_kv_steps=(m.detach().sum(1) ** 2).sum() * n,
             hard=False,
             routing_is_fixed=True,
         )
@@ -412,9 +423,9 @@ class AdaptiveStack(nn.Module):
             halting_probs=torch.stack(halting_probs, 1),
             step_active=torch.stack(step_active, 1),
             mask=mask,
-            token_steps=float(token_steps.detach()),
-            kv_token_steps=float(kv_token_steps.detach()),
-            attn_kv_steps=float(attn_kv_steps.detach()),
+            token_steps=token_steps.detach(),
+            kv_token_steps=kv_token_steps.detach(),
+            attn_kv_steps=attn_kv_steps.detach(),
             hard=False,
             routing_is_fixed=self.routing == "fixed",
         )

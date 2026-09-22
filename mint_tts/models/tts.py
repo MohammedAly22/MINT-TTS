@@ -403,17 +403,17 @@ class AdaptiveTTS(nn.Module):
                 ref_flops += conv1d_flops(conv.in_channels, conv.out_channels,
                                           conv.kernel_size[0], ref_len)
             rep.add("reference_encoder", ref_flops)
-        rep.add("encoder", stack_flops(self.encoder, out.encoder_router.token_steps,
-                                       out.encoder_router.attn_kv_steps,
-                                       out.encoder_router.kv_token_steps))
+        rep.add("encoder", stack_flops(self.encoder, float(out.encoder_router.token_steps),
+                                       float(out.encoder_router.attn_kv_steps),
+                                       float(out.encoder_router.kv_token_steps)))
         rep.add("duration_predictor", variance_predictor_flops(self.duration_predictor, T_text))
         if self.use_pitch:
             rep.add("pitch_predictor", variance_predictor_flops(self.pitch_predictor, T_text))
         if self.use_energy:
             rep.add("energy_predictor", variance_predictor_flops(self.energy_predictor, T_text))
-        rep.add("decoder", stack_flops(self.decoder, out.decoder_router.token_steps,
-                                       out.decoder_router.attn_kv_steps,
-                                       out.decoder_router.kv_token_steps))
+        rep.add("decoder", stack_flops(self.decoder, float(out.decoder_router.token_steps),
+                                       float(out.decoder_router.attn_kv_steps),
+                                       float(out.decoder_router.kv_token_steps)))
         rep.add("mel_linear", linear_flops(self.d_model, self.n_mels, T_mel))
         rep.add("postnet", convstack_flops(self.postnet, T_mel))
 

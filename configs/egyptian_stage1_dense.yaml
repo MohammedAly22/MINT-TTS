@@ -1,0 +1,55 @@
+# =============================================================================
+# Stage 1 of 2 -- the best DENSE model.
+#
+#   python scripts/train.py --config configs/egyptian_stage1_dense.yaml --resume auto
+#
+# Every token runs at full depth for the whole run: no compute penalty, no
+# router. Reconstruction quality is the only objective, so this run is the
+# quality ceiling that stage 2 (egyptian_stage2_route.yaml) must preserve
+# while it learns where depth can be dropped.
+#
+# Why two stages. Routing from the start asks one run to learn text->speech
+# and where computation can be skipped at the same time, and the second
+# question has no good answer until the first is learned: early on every
+# token "needs" depth because nothing is learned yet. The single-stage run
+# showed this -- function words such as في sat near the top of the depth
+# plots, which says more about an under-trained model than about difficulty.
+# A converged dense model gives stage 2 a fixed reference: depth is dropped
+# only where the dense model's representation is already settled.
+#
+# Random-depth steps. On `random_depth_prob` of the steps the whole encoder
+# runs at a random shallower depth (1..max_steps-1). The model is still
+# trained at full depth the rest of the time and is validated at full depth,
+# but every intermediate state is also trained as an OUTPUT -- otherwise the
+# first time stage 2 halts a token early, the decoder would receive a state
+# it has never seen.
+#
+# Warm start. `train.init_from` loads weights only (EMA preferred) with a
+# fresh optimiser and step counter; the notebook points it at the previous
+# single-stage run so its ~30k steps are not thrown away. When warm-starting,
+# also start the bin loss at step 0 (alignment is already learned):
+#   --override train.init_from=<ckpt> loss.bin_start_step=0 loss.bin_warmup_steps=0
+# =============================================================================
+
+_base_: egyptian_homograph.yaml
+
+train:
+  init_from: null
+  freeze_routing: true
+  random_depth_prob: 0.25
+  random_depth_min: 1
+  # Stop when val/mcd stops improving; this is a ceiling, not a budget.
+  max_steps: 200000
+  scheduler:
+    name: cosine
+    warmup_steps: 2000
+    min_lr_ratio: 0.05
+
+loss:
+  compute:
+    enabled: false
+    difficulty_relief: 0.0
+    difficulty_contrast_weight: 0.0
+
+log:
+  run_name: egyptian_stage1_dense

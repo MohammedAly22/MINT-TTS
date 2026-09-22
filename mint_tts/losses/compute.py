@@ -131,8 +131,7 @@ class ComputeLoss(nn.Module):
         # With no hard tokens in the batch there is no contrast to report;
         # returning easy_depth makes the logged difference exactly 0 rather
         # than a spurious -easy_depth.
-        if float(n_hard) == 0.0:
-            hard_depth = easy_depth
+        hard_depth = torch.where(n_hard > 0, hard_depth, easy_depth)
         return weighted, hard_depth, easy_depth, n_hard
 
     def forward(self, out, budget: torch.Tensor | None, step: int,
@@ -144,7 +143,11 @@ class ComputeLoss(nn.Module):
         if not self.enabled:
             return zero, logs
 
-        use_difficulty = difficulty is not None and self.difficulty_relief > 0
+        # Difficulty is REPORTED whenever it is available, and only changes the
+        # price when relief > 0. With relief 0 every token pays the same, so
+        # the hard/easy contrast then measures what the router chose on its
+        # own -- the stronger form of the claim.
+        use_difficulty = difficulty is not None
         if use_difficulty:
             c_enc, hard_d, easy_d, n_hard = self._difficulty_weighted(
                 out.encoder_router, difficulty)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 import time
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from ..utils.common import (
     EMA,
     device_name,
     find_latest_checkpoint,
+    warm_start_weights,
     gpu_memory_mb,
     load_checkpoint,
     move_to,
@@ -137,6 +139,21 @@ class Trainer:
             router_start = cfg.loss.compute.get("warmup_steps", 0)
         self.router_start_step = int(router_start) if self.compute_loss.enabled else 0
 
+        # -- two-stage training ------------------------------------------
+        # Stage 1 (dense): `freeze_routing` holds every token at full depth
+        # for the whole run, and `random_depth_prob` trains a fraction of the
+        # steps at a random shallower depth so every intermediate state stays
+        # a usable output. Stage 2 (routing) starts from that model and learns
+        # where depth can be dropped, with the frozen dense model as a
+        # teacher so quality is held while compute comes down.
+        self.freeze_routing = bool(p.get("freeze_routing", False))
+        self.random_depth_prob = float(p.get("random_depth_prob", 0.0))
+        self.random_depth_min = int(p.get("random_depth_min", 1))
+        self._depth_rng = random.Random(cfg.get("seed", 1234) + 17)
+        distill = cfg.loss.get("distill", {}) or {}
+        self.distill_weight = float(distill.get("weight", 0.0))
+        self.teacher = None
+
         self.vocoder = None
         if cfg.log.get("log_audio", True):
             try:
@@ -170,8 +187,66 @@ class Trainer:
             self.epoch = int(ckpt.get("epoch", 0))
             self.best_val = float((ckpt.get("extra") or {}).get("best_val", float("inf")))
             self.log.info(f"Resumed from {resume} at step {self.step}")
+        elif p.get("init_from"):
+            # A new stage: the previous stage's weights, but a fresh optimiser,
+            # schedule and step counter. Only when this run has no checkpoint
+            # of its own -- after that, `--resume auto` continues the stage.
+            self.model.load_state_dict(warm_start_weights(p.init_from), strict=True)
+            if self.ema is not None:
+                self.ema = EMA(self.model, p.get("ema_decay", 0.999))
+            self.log.info(f"Initialised from {p.init_from} (EMA weights; fresh optimiser)")
+
+        if self.distill_weight > 0:
+            self.teacher = self._build_teacher(distill)
 
         self._log_model_summary()
+
+    def _build_teacher(self, distill_cfg):
+        """The frozen dense model the routed student must stay close to.
+
+        Its weights are copied into this run's directory the first time, so
+        the teacher is fixed for the whole stage even if the dense run it came
+        from carries on training (and survives a new Colab session).
+        """
+        local = self.run_dir / "teacher.pt"
+        if not local.exists():
+            src = distill_cfg.get("teacher") or self.cfg.train.get("init_from")
+            if not src:
+                raise ValueError("loss.distill.weight > 0 needs loss.distill.teacher "
+                                 "or train.init_from (the dense stage-1 checkpoint)")
+            torch.save({"model": warm_start_weights(src), "source": str(src)}, local)
+            self.log.info(f"Teacher weights from {src} -> {local}")
+        teacher = build_model(self.cfg, self.tp.vocab_size)
+        teacher.load_state_dict(torch.load(local, map_location="cpu",
+                                           weights_only=False)["model"], strict=True)
+        teacher = teacher.to(self.device).eval()
+        for prm in teacher.parameters():
+            prm.requires_grad_(False)
+        self.log.info(f"Distillation from the dense teacher, weight {self.distill_weight}")
+        return teacher
+
+    def _distill_loss(self, out, batch, budget) -> torch.Tensor:
+        """Relative MSE between the routed encoder output and the dense one.
+
+        The encoder is the routed stack, so this is where early halting can
+        lose information; matching the teacher's full-depth representation
+        per token is the direct statement of "cheaper, but the same". The
+        teacher sees exactly the student's conditioning (the same speaker
+        vector, after reference dropout), so any difference is depth alone.
+        """
+        with torch.no_grad():
+            teacher_enc, _, _ = self.teacher.encode_text(
+                batch["tokens"], out.text_mask, budget, False, None,
+                batch.get("speakers"), batch.get("emotions"), True,
+                semantic=batch.get("semantic"), word_index=batch.get("word_index"),
+                speaker_vec=(out.speaker_vector.detach()
+                             if out.speaker_vector is not None else None),
+            )
+            target = teacher_enc.output.float()
+        m = out.text_mask.float()
+        err = ((out.encoder_router.output.float() - target) ** 2).sum(-1)
+        scale = ((target ** 2).sum(-1) * m).sum() / m.sum().clamp_min(1.0)
+        return (err * m).sum() / m.sum().clamp_min(1.0) / scale.clamp_min(1e-6)
 
     def _report_ambiguity_source(self) -> None:
         """Say where the difficulty signal and the probes came from.
@@ -344,7 +419,7 @@ class Trainer:
 
     @property
     def routing_frozen(self) -> bool:
-        return self.step < self.router_start_step
+        return self.freeze_routing or self.step < self.router_start_step
 
     # -- one step ---------------------------------------------------------
     def train_step(self, batch: dict, diagnostics: bool = True) -> dict:
@@ -364,6 +439,15 @@ class Trainer:
             h_range=tuple(c.get("h_range", [0.3, 1.0])),
             use_hardware=bool(c.get("use_hardware_cap", True)),
         )
+        # Random-depth steps (dense stage only): the whole encoder runs at one
+        # shallower depth, so the states a router will later stop at are
+        # trained as outputs rather than only as inputs to the next step.
+        enc_depth = None
+        if (self.routing_frozen and self.random_depth_prob > 0
+                and self._depth_rng.random() < self.random_depth_prob):
+            top = self.model.encoder.max_steps - 1
+            if top >= self.random_depth_min:
+                enc_depth = self._depth_rng.randint(self.random_depth_min, top)
         with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype,
                             enabled=self.use_amp):
             out = self.model(
@@ -371,6 +455,7 @@ class Trainer:
                 pitch=batch.get("pitch"), energy=batch.get("energy"),
                 speakers=batch.get("speakers"), emotions=batch.get("emotions"),
                 budget=budget, attn_prior=batch.get("attn_prior"),
+                encoder_max_steps=enc_depth,
                 force_full_depth=self.routing_frozen,
                 semantic=batch.get("semantic"), word_index=batch.get("word_index"),
                 reference_mel=batch.get("reference_mel"),
@@ -380,7 +465,12 @@ class Trainer:
             comp, clogs = self.compute_loss(out, budget, self.step, batch.get("c_star"),
                                             difficulty=batch.get("difficulty"))
             loss = recon + comp
+            if self.teacher is not None:
+                distill = self._distill_loss(out, batch, budget)
+                loss = loss + self.distill_weight * distill
+                logs["loss/distill"] = distill.detach()
         logs.update(clogs)
+        logs["train/random_depth"] = float(enc_depth or 0)
         logs["loss/total"] = loss.detach()
 
         self.scaler.scale(loss / self.grad_accum).backward()
@@ -445,6 +535,9 @@ class Trainer:
                 pitch=batch.get("pitch"), energy=batch.get("energy"),
                 speakers=batch.get("speakers"), emotions=batch.get("emotions"),
                 budget=budget, attn_prior=batch.get("attn_prior"),
+                # While routing is frozen the model being trained IS the
+                # full-depth one, so that is the one to validate.
+                force_full_depth=self.routing_frozen,
                 semantic=batch.get("semantic"), word_index=batch.get("word_index"),
                 reference_mel=batch.get("reference_mel"),
                 reference_lens=batch.get("reference_lens"),

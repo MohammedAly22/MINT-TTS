@@ -1,0 +1,57 @@
+# =============================================================================
+# Stage 2 of 2 -- learn WHERE depth can be dropped, without losing quality.
+#
+#   python scripts/train.py --config configs/egyptian_stage2_route.yaml --resume auto
+#
+# Starts from the dense stage-1 model and turns the router on. Two forces:
+#
+#   * the compute penalty pushes every token to halt early;
+#   * a distillation loss (loss.distill) holds each token's encoder output
+#     to what the frozen dense model produces at full depth.
+#
+# A token can therefore only stop early where stopping does not change its
+# representation -- where the dense model had already settled. That is
+# compression with a fixed reference, and "where did the depth stay" is then
+# a measurement of the model rather than something the loss dictated.
+#
+# Difficulty is REPORTED but not PRICED (difficulty_relief: 0): every token
+# pays the same per step, so `compute/difficulty_contrast` shows what the
+# router chose on its own. That is the stronger form of the claim -- with a
+# relief term, ambiguous words getting more depth would be partly true by
+# construction.
+#
+# Knobs, if the balance is off:
+#   compute does not come down -> raise loss.compute.lambda_max
+#   val/mcd rises above stage 1 -> raise loss.distill.weight
+# =============================================================================
+
+_base_: egyptian_homograph.yaml
+
+train:
+  init_from: runs/egyptian_stage1_dense/checkpoints/best.pt
+  freeze_routing: false
+  random_depth_prob: 0.0
+  lr: 1.5e-4            # fine-tuning a converged model
+  max_steps: 60000
+  scheduler:
+    name: cosine
+    warmup_steps: 1000
+    min_lr_ratio: 0.05
+
+loss:
+  # alignment was learned in stage 1
+  bin_start_step: 0
+  bin_warmup_steps: 0
+  distill:
+    weight: 1.0          # teacher = train.init_from, frozen for the whole stage
+  compute:
+    enabled: true
+    warmup_steps: 0
+    router_start_step: 0
+    ramp_steps: 5000     # the penalty grows while distillation holds quality
+    difficulty_relief: 0.0
+    difficulty_contrast_weight: 0.0
+    report_difficulty: true
+
+log:
+  run_name: egyptian_stage2_route
